@@ -9,8 +9,6 @@
     "test": "bun test harness/",
     "agent:run": "bun harness/run-agent.ts",
     "agent:verify": "bun harness/verify-homepage.ts",
-    "agent:resume-test": "bun harness/test-resume.ts crash && bun harness/test-resume.ts resume",
-    "agent:retention": "bun harness/check-retention.ts",
     "extension:test": "bun harness/test-extension.ts"
   },
   "devDependencies": {

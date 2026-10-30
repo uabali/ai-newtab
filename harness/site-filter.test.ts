@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
-import type Anthropic from "@anthropic-ai/sdk";
-import { isBlocked, isPrivateAddress, normalizeBlockList, runHomepageBuild, type BrowserBridge, type KVStore } from "@homepage/agent-core";
+import { isBlocked, isPrivateAddress, normalizeBlockList, runHomepageBuild, type BrowserBridge } from "@homepage/agent-core";
 import { fixtureHistory } from "./node-bridge";
+import { COMPONENT, MemoryStore, call, mockClient, toolResults } from "./mock-llm";
 
 test("normalizes pasted hosts and URLs", () => {
   expect(normalizeBlockList([" HTTPS://WWW.Google.COM/path ", "", " # comment", "*.Example.COM", "google.com"])).toEqual(["google.com", "*.example.com"]);
@@ -21,62 +21,45 @@ test("matches hosts and subdomains without matching lookalikes", () => {
   expect(isBlocked("google.com.evil.test", ["google.com"])).toBe(false);
 });
 
-/** Exercise live and replayed tool dispatch without a network or browser. */
-async function runTools(urls: string[], blockedSites?: string[] | (() => Promise<string[]>), resume = false, afterHistory?: () => void, scrape?: BrowserBridge["getPageHtml"]) {
-  const results: any[] = [];
-  const uploads: string[] = [];
+/**
+ * Run the real loop against a scripted model that calls getHistory, then
+ * getPageHtml with `urls`, then writes the homepage. Returns what each tool
+ * answered (as the model saw it) and what reached the browser bridge.
+ */
+async function runTools(urls: string[], blockedSites?: string[] | (() => Promise<string[]>), afterHistory?: () => void, scrape?: BrowserBridge["getPageHtml"]) {
   const calls: string[][] = [];
   const logs: string[] = [];
-  const events = [
-    { id: "history", type: "agent.custom_tool_use", name: "getHistory", input: { maxResults: 1 } },
-    { id: "pages", type: "agent.custom_tool_use", name: "getPageHtml", input: { urls } },
-  ];
-  const idle = { id: "idle", type: "session.status_idle", stop_reason: { type: "end_turn" } };
-  async function* stream() { if (!resume) yield* events; yield idle; }
-  const client = { beta: {
-    agents: {
-      // No cached agent is retrieved, so ensureAgent takes the create path. The update path is not under test here.
-      retrieve: async () => { throw new Error("not found"); },
-      create: async () => ({ id: "agent", version: 1 }),
-      update: async () => ({ id: "agent", version: 2 }),
+  let historyReturned = false;
+  const { llm, requests } = mockClient([
+    { toolCalls: [call("getHistory", { maxResults: 1 }, "history")] },
+    () => {
+      afterHistory?.();
+      return turnResponse([call("getPageHtml", { urls }, "pages")]);
     },
-    environments: { retrieve: async () => ({}) },
-    sessions: {
-      create: async () => ({ id: "session" }),
-      retrieve: async () => ({ status: "idle" }), delete: async () => {},
-      resources: { add: async (_id: string, body: any) => ({ mount_path: body.mount_path }) },
-      events: {
-        stream: async () => stream(),
-        list: async function* () { if (resume) yield* events; },
-        send: async (_id: string, body: any) => {
-          const toolResults = body.events.filter((e: any) => e.type === "user.custom_tool_result");
-          results.push(...toolResults);
-          if (toolResults.some((e: any) => e.custom_tool_use_id === "history")) afterHistory?.();
-        },
-      },
-    },
-    files: {
-      list: async function* () { yield { id: "output", filename: "homepage.tsx" }; },
-      download: async () => new Response("export default function PersonalizedHomepage() {}"),
-      upload: async ({ file }: { file: File }) => { uploads.push(file.name); return { id: `file-${uploads.length}` }; },
-      delete: async () => {},
-    },
-  } } as unknown as Anthropic;
-  const store: KVStore = {
-    get: async <T>(key: string) => (key === "uploadedFileIds" ? [] : "cached") as T,
-    set: async () => {}, remove: async () => {},
-  };
+    { toolCalls: [call("write", { path: "/outputs/homepage.tsx", content: COMPONENT })] },
+    { content: "Done." },
+  ]);
   const bridge: BrowserBridge = {
-    getHistory: async () => ({ sites: fixtureHistory(), totalSitesSeen: fixtureHistory().length }),
+    getHistory: async () => {
+      historyReturned = true;
+      return { sites: fixtureHistory(), totalSitesSeen: fixtureHistory().length };
+    },
     getPageHtml: scrape ?? (async ({ urls }) => { calls.push(urls); return { pages: [], failed: urls.map(url => ({ url, reason: "unavailable" })) }; }),
   };
-  await runHomepageBuild({ client, store, bridge, blockedSites, resumeSessionId: resume ? "session" : undefined, callbacks: { onLog: line => logs.push(line) } });
-  return { results, calls, logs, uploads };
+  const store = new MemoryStore();
+  await runHomepageBuild({ llm, store, bridge, blockedSites, callbacks: { onLog: line => logs.push(line) } });
+  expect(historyReturned).toBe(true);
+  const results = toolResults(requests.at(-1)!);
+  return { history: results.history!, pages: results.pages!, calls, logs, requests };
+}
+
+function turnResponse(toolCalls: ReturnType<typeof call>[]) {
+  return new Response(JSON.stringify({ choices: [{ finish_reason: "tool_calls", message: { role: "assistant", content: null, tool_calls: toolCalls.map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: JSON.stringify(c.args) } })) } }] }), { status: 200 });
 }
 
 test("filters history before capping and excludes blocked sites from the count", async () => {
-  const { results } = await runTools([], ["news.ycombinator.com"]);
-  const digest = JSON.parse(results[0].content[0].text);
+  const { history } = await runTools(["https://public.test"], ["news.ycombinator.com"]);
+  const digest = JSON.parse(history);
   expect(digest.totalSitesSeen).toBe(fixtureHistory().length - 1);
   expect(digest.sites).toHaveLength(1);
   expect(JSON.stringify(digest)).not.toContain("news.ycombinator.com");
@@ -84,35 +67,32 @@ test("filters history before capping and excludes blocked sites from the count",
 
 test("uses newly saved blocked sites for the next tool call in an active build", async () => {
   let savedSites: string[] = [];
-  const { results, calls } = await runTools(
+  const { history, pages, calls } = await runTools(
     ["https://news.ycombinator.com"],
     async () => savedSites,
-    false,
     () => { savedSites = ["news.ycombinator.com"]; },
   );
-  expect(JSON.stringify(JSON.parse(results[0].content[0].text))).toContain("news.ycombinator.com");
+  expect(history).toContain("news.ycombinator.com");
   expect(calls).toEqual([]);
-  expect(JSON.parse(results[1].content[0].text)).toEqual({
+  expect(JSON.parse(pages)).toEqual({
     pages: [],
     failed: [{ url: "https://news.ycombinator.com", reason: "blocked by the user's settings" }],
   });
 });
 
-test("never forwards blocked or non-http URLs, including on resume", async () => {
+test("never forwards blocked or non-http URLs", async () => {
   const urls = ["https://bank.test", "https://sub.bank.test", "https:/bank.test", "https:\\bank.test", "file:///secret", "chrome://settings", "javascript:alert(1)", "not a url"];
-  for (const resume of [false, true]) {
-    const { results, calls, logs } = await runTools(urls, ["bank.test"], resume);
-    expect(calls).toEqual([]);
-    expect(results[1].is_error).toBeUndefined();
-    expect(JSON.parse(results[1].content[0].text)).toEqual({ pages: [], failed: urls.map(url => ({ url, reason: "blocked by the user's settings" })) });
-    expect(logs).toContain("blocked: 8 url(s)");
-  }
+  const { pages, calls, logs } = await runTools(urls, ["bank.test"]);
+  expect(calls).toEqual([]);
+  expect(pages.startsWith("Error")).toBe(false);
+  expect(JSON.parse(pages)).toEqual({ pages: [], failed: urls.map(url => ({ url, reason: "blocked by the user's settings" })) });
+  expect(logs).toContain("blocked: 8 url(s)");
 });
 
 test("only forwards allowed URLs in mixed batches", async () => {
-  const { results, calls } = await runTools(["https://bank.test", "https://public.test"], ["bank.test"]);
+  const { pages, calls } = await runTools(["https://bank.test", "https://public.test"], ["bank.test"]);
   expect(calls).toEqual([["https://public.test"]]);
-  expect(JSON.parse(results[1].content[0].text).failed).toEqual([
+  expect(JSON.parse(pages).failed).toEqual([
     { url: "https://bank.test", reason: "blocked by the user's settings" },
     { url: "https://public.test", reason: "unavailable" },
   ]);
@@ -140,17 +120,18 @@ test("always blocks loopback, private and local-network hosts", () => {
 
 test("drops pages that redirected to a blocked host before uploading them", async () => {
   const redirector = "https://www.google.com/url?q=https://mail.google.com/";
-  const { results, uploads } = await runTools([redirector, "https://public.test/"], ["mail.google.com"], false, undefined, async ({ urls }) => ({
+  const { pages, requests } = await runTools([redirector, "https://public.test/"], ["mail.google.com"], undefined, async ({ urls }) => ({
     pages: [
       { url: urls[0]!, finalUrl: "https://mail.google.com/mail/u/0/", title: "Inbox", html: "<p>secret</p>" },
       { url: urls[1]!, finalUrl: "https://public.test/", title: "Public", html: "<p>news</p>" },
     ],
     failed: [],
   }));
-  const out = JSON.parse(results[1].content[0].text);
-  expect(uploads).toHaveLength(1);
+  const out = JSON.parse(pages);
   expect(out.pages.map((p: any) => p.url)).toEqual(["https://public.test/"]);
   expect(out.failed).toEqual([{ url: redirector, reason: "blocked by the user's settings" }]);
+  // Nothing the blocked page held ever reached the model endpoint.
+  expect(JSON.stringify(requests.map((r) => r.body))).not.toContain("secret");
   expect(JSON.stringify(out)).not.toContain("Inbox");
 });
 
@@ -165,7 +146,7 @@ test("classifies the addresses webRequest reports", () => {
 
 test("drops pages served from a private address under a public-looking name", async () => {
   const urls = ["http://fritz.box/", "https://public.test/", "https://unknown.test/"];
-  const { results, uploads } = await runTools(urls, [], false, undefined, async ({ urls }) => ({
+  const { pages, requests } = await runTools(urls, [], undefined, async ({ urls }) => ({
     pages: [
       { url: urls[0]!, finalUrl: urls[0], ip: "192.168.179.1", title: "FRITZ!Box", html: "<p>router</p>" },
       { url: urls[1]!, finalUrl: urls[1], ip: "160.79.104.10", title: "Public", html: "<p>news</p>" },
@@ -173,9 +154,10 @@ test("drops pages served from a private address under a public-looking name", as
     ],
     failed: [],
   }));
-  const out = JSON.parse(results[1].content[0].text);
-  expect(uploads).toHaveLength(2);
+  const out = JSON.parse(pages);
+  expect(out.pages).toHaveLength(2);
   expect(out.pages.map((p: any) => p.url)).toEqual(["https://public.test/", "https://unknown.test/"]);
+  expect(JSON.stringify(requests.map((r) => r.body))).not.toContain("router");
   expect(out.failed).toEqual([{ url: "http://fritz.box/", reason: "blocked by the user's settings" }]);
   expect(JSON.stringify(out)).not.toContain("FRITZ");
 });

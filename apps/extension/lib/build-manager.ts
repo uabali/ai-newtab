@@ -1,7 +1,7 @@
-import Anthropic from "@anthropic-ai/sdk";
-import { runHomepageBuild, type RunPhase } from "@homepage/agent-core";
+import { createChatClient, normalizeBaseUrl, runHomepageBuild, type RunPhase } from "@homepage/agent-core";
 import { shouldAutoRebuild } from "./auto-rebuild";
 import { browserBridge } from "./browser-bridge";
+import { setApiOrigin } from "./scraper";
 import {
   INITIAL_BUILD_STATE,
   LOG_RETENTION,
@@ -83,8 +83,8 @@ export class BuildManager {
 
   /**
    * Called on worker wake and on every alarm tick. If a session was left
-   * mid-flight, reattach and continue (lossless — the orchestrator replays the
-   * event log and re-answers orphaned tool calls). Otherwise, consider the daily
+   * mid-flight, resume it from its local checkpoint (the conversation and the
+   * scraped pages, saved after every model turn). Otherwise, consider the daily
    * rebuild. The single-flight lock is the arbiter that keeps these from racing.
    */
   async tick() {
@@ -147,12 +147,12 @@ export class BuildManager {
     this.controller = new AbortController();
 
     try {
-      const { apiKey, systemPrompt, model } = await loadSettings();
+      const { apiKey, systemPrompt, model, baseUrl } = await loadSettings();
       if (!apiKey) {
         // Manual builds are gated behind the key-setup screen and auto-builds
         // require a key, so this only happens if the key was removed.
         console.warn("[BuildManager] startBuild aborted — no API key in storage");
-        const message = "No Anthropic API key found. Add your key and try again.";
+        const message = "No OpenRouter API key found. Add your key and try again.";
         this.state = { ...INITIAL_BUILD_STATE, phase: "error", error: message };
         this.broadcast({ kind: "error", message });
         return;
@@ -164,15 +164,18 @@ export class BuildManager {
       console.log("[BuildManager] build started", { resume: Boolean(opts.resume) });
 
       // The key is the user's own, read from local storage — there is no server
-      // to hide it behind. See ARCHITECTURE.md → Privacy.
-      const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true });
+      // to hide it behind. See ARCHITECTURE.md → Privacy. Every model request
+      // goes to this one endpoint and nowhere else.
+      const endpoint = normalizeBaseUrl(baseUrl);
+      setApiOrigin(endpoint);
+      const llm = createChatClient({ apiKey, baseUrl: endpoint });
 
       const resumeSessionId = opts.resume
         ? await extensionStore.get<string>(KEYS.activeSessionId)
         : undefined;
 
       const result = await runHomepageBuild({
-        client,
+        llm,
         bridge: browserBridge,
         store: extensionStore,
         userSystemPrompt: systemPrompt,
@@ -271,7 +274,7 @@ export class BuildManager {
   private startKeepalive() {
     this.keepalive ??= setInterval(() => {
       // A cheap chrome API call resets the ~30s idle-unload timer while a turn is
-      // in flight (the in-flight session fetch does most of the work; this covers
+      // in flight (the in-flight model request does most of the work; this covers
       // the gaps between requests).
       void browser.runtime.getPlatformInfo();
     }, KEEPALIVE_INTERVAL_MS);

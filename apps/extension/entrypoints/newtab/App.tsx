@@ -16,6 +16,7 @@ export default function App() {
   const [systemPrompt, setSystemPrompt] = useState("");
   const [blockedSites, setBlockedSites] = useState<string[]>(DEFAULT_BLOCKED_SITES);
   const [model, setModel] = useState<HomepageModel>(DEFAULT_MODEL);
+  const [baseUrl, setBaseUrl] = useState("");
   const [autoRebuild, setAutoRebuild] = useState(true);
   /** Transpiled homepage, ready for Sandpack. */
   const [renderedCode, setRenderedCode] = useState<string | null>(null);
@@ -48,6 +49,7 @@ export default function App() {
         setSystemPrompt(settings.systemPrompt);
         setBlockedSites(settings.blockedSites);
         setModel(settings.model);
+        setBaseUrl(settings.baseUrl);
         setAutoRebuild(settings.autoRebuild);
         setResumable(activeSession ?? null);
         if (homepage?.code) setRenderedCode(toRenderable(homepage.code));
@@ -78,6 +80,14 @@ export default function App() {
   const changeModel = useCallback(async (next: HomepageModel) => {
     setModel(next);
     await saveSetting("model", next);
+  }, []);
+  const changeBaseUrl = useCallback(async (next: string) => {
+    setBaseUrl(next);
+    await saveSetting("baseUrl", next);
+  }, []);
+  const changeApiKey = useCallback(async (next: string) => {
+    setApiKey(next);
+    await saveSetting("apiKey", next);
   }, []);
   const toggleAutoRebuild = useCallback(async (next: boolean) => {
     setAutoRebuild(next);
@@ -204,6 +214,9 @@ export default function App() {
           blockedSites={blockedSites}
           model={model}
           onChangeModel={changeModel}
+          baseUrl={baseUrl}
+          onChangeBaseUrl={changeBaseUrl}
+          onChangeApiKey={changeApiKey}
           autoRebuild={autoRebuild}
           onToggleAutoRebuild={toggleAutoRebuild}
           onClose={() => setShowSettings(false)}

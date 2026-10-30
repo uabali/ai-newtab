@@ -9,6 +9,6 @@ pnpm dev         # hot-reload dev build
 pnpm typecheck
 ```
 
-- `entrypoints/background.ts`: the service worker that hosts the build
-- `entrypoints/newtab/`: the new-tab UI, a thin client onto the worker
+- `entrypoints/background.ts`: the service worker that hosts the build (the local agent loop talking to OpenRouter)
+- `entrypoints/newtab/`: the new-tab UI, a thin client onto the worker (API key, model and base URL live in Settings)
 - `lib/`: the build manager, the two browser tools, storage and the page↔worker protocol

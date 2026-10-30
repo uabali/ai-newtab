@@ -2,6 +2,13 @@
 
 **A new tab that reads the internet for you.**
 
+> This is a fork of [ThariqS/ai-newtab](https://github.com/ThariqS/ai-newtab) by
+> Thariq Shihipar (MIT). The original drives a Claude Managed Agents session with an
+> Anthropic API key; this fork (`openrouter` branch) runs the agent loop locally in
+> the extension and talks to **[OpenRouter](https://openrouter.ai)** (or any
+> OpenAI-compatible `/chat/completions` endpoint with tool calling), so no Anthropic
+> key is needed. All credit for the idea, UI and tooling goes to the original author.
+
 AI Homepage replaces Chrome's new-tab page with one that's written for you. An
 agent looks at what you've actually been browsing, opens the pages you follow
 (signed in as you), and writes a fresh homepage from what it finds there. It
@@ -16,10 +23,13 @@ terminal, a zine.
 
 > **Privacy, up front.** To build your homepage, the extension sends a summary of
 > your browsing history (top domains, visit counts, a few page titles) and the
-> cleaned-up HTML of up to 8 pages to the Anthropic API, using your own API key.
+> cleaned-up HTML of up to 8 pages (truncated) to OpenRouter, or to the base URL
+> you configure, using your own API key. OpenRouter forwards each request to the
+> provider of the model you pick, so that provider's data policy applies too.
 > Those pages are loaded in your signed-in browser, so they can include private
-> content. The agent session and every uploaded page are deleted when each build
-> ends. Your API key stays in the extension's local storage. More detail in
+> content. There is no remote session: pages are held in the extension's memory for
+> the duration of a build and only reach the model as tool results. Your API key
+> stays in the extension's local storage. More detail in
 > [ARCHITECTURE.md](./ARCHITECTURE.md#privacy).
 
 ---
@@ -27,10 +37,10 @@ terminal, a zine.
 ## Install
 
 You need Chrome (or another Chromium browser), [Node.js](https://nodejs.org) 20+,
-and an [Anthropic API key](https://console.anthropic.com).
+and an [OpenRouter API key](https://openrouter.ai/settings/keys).
 
 ```bash
-git clone https://github.com/ThariqS/ai-newtab.git
+git clone -b openrouter https://github.com/uabali/ai-newtab.git
 cd ai-newtab
 npx pnpm@10.11.1 install
 npx pnpm@10.11.1 build
@@ -48,7 +58,7 @@ If Chrome asks whether to keep the changed new-tab page, choose **Keep it**.
 
 ## Your first homepage
 
-1. Open a new tab and paste your Anthropic API key.
+1. Open a new tab and paste your OpenRouter API key (`sk-or-…`).
 2. Click **Build today's homepage**.
 3. Watch it work. The progress view walks through each step: preparing the
    agent, reading your history, opening pages in your browser, analyzing them,
@@ -82,13 +92,21 @@ history summaries and URLs requested through `getPageHtml`. A page that redirect
 onto a blocked host is dropped before its content is uploaded. Local-network
 addresses (localhost, private IPs, `.local` and `.internal` hosts) are always blocked.
 
-**Model.** Choose which Claude model writes your page:
+**Model.** Type any OpenRouter model id (the field suggests a few). The model
+must support **tool calling**; check the "Tools" filter on
+[openrouter.ai/models](https://openrouter.ai/models?supported_parameters=tools).
 
-- **Claude Sonnet 5.5** (default): the best balance of quality and cost.
-- **Claude Haiku 5.5**: the fastest and cheapest.
-- **Claude Opus 5.5**: the most careful editor, and the most expensive.
+- **`deepseek/deepseek-v4-flash`** (default): cheap, 1M context, solid tool use.
+- `google/gemini-3.5-flash`, `anthropic/claude-sonnet-5.5`: pricier, stronger editors.
+- **Free:** `google/gemma-4-31b-it:free` or `nvidia/nemotron-3-ultra-550b-a55b:free`.
+  Free models are heavily rate-limited and may be slower or fail mid-build;
+  OpenRouter may also log prompts for free endpoints.
 
 The new model takes effect from your next build.
+
+**Base URL** (optional). Defaults to `https://openrouter.ai/api/v1`. Any HTTPS,
+OpenAI-compatible endpoint that supports `tools` works; the extension appends
+`/chat/completions`. Plain `http://` (e.g. a local server) is rejected.
 
 **Rebuild automatically each morning.** On by default. The extension builds one
 morning edition a day, quietly in the background, the first time Chrome is open
@@ -100,16 +118,20 @@ morning, so it never loops.
 
 ## Good to know
 
-- **Cost.** Each build is a single agent session billed to your API key. What it
-  costs depends on the model and on how much it reads. Haiku is the cheapest
-  choice, and you can turn off automatic rebuilds to build only when you ask.
+- **Cost.** Each build is a series of chat-completion calls (up to 40 steps)
+  billed to your OpenRouter key. What it costs depends on the model and on how
+  much it reads; page HTML and tool results are truncated to keep prompts small.
+  `:free` models cost nothing but are rate-limited, and you can turn off
+  automatic rebuilds to build only when you ask.
 - **What it can see.** It ranks the sites in your history and opens up to 8 of
   them per build. It skips search engines, webmail, banking and logged-out
   marketing pages. Anything it can't open is reported, not hidden.
 - **Links are real.** Every link on the page comes from a page the agent actually
   read. It's told never to invent a URL.
-- **Interrupted builds.** If Chrome closes mid-build, the new tab offers
-  **Resume interrupted build** next time.
+- **Interrupted builds.** The conversation and scraped pages are checkpointed to
+  local storage after every tool turn. If Chrome closes mid-build, the new tab
+  offers **Resume interrupted build** and continues from the last checkpoint
+  without re-scraping.
 - **Updating.** After pulling new code, run `npx pnpm@10.11.1 build` again, then
   click the reload icon on the extension in `chrome://extensions`.
 
@@ -117,16 +139,18 @@ morning, so it never loops.
 
 1. **`getHistory`**: the agent gets a ranked summary of your most-visited domains.
 2. **`getPageHtml`**: it picks up to 8 pages, which the extension opens in a
-   background window, cleans up, and mounts into the agent's sandbox as files.
-3. **`grep` / `read`**: the agent pulls headlines, posts and links out of those
-   files inside its sandbox.
-4. **`write`**: it writes one React component, which the new tab renders.
+   background window, cleans up, and stores in an in-memory workspace as
+   `/pages/*.html`.
+3. **`grep` / `glob` / `read`**: the agent pulls headlines, posts and links out of
+   those files. These tools run in the extension, over memory only.
+4. **`write`**: it writes one React component to `/outputs/homepage.tsx`, which
+   the new tab renders.
 
-The extension's background worker drives a
-[Claude Managed Agents](https://docs.claude.com) session directly, with no server
-in between. The two custom tools run in the extension because they need
-`chrome.history` and `chrome.tabs`. Everything else happens in the agent's
-sandbox, where shell access is off: scraped pages are untrusted input.
+The extension's background worker runs the agent loop itself
+(`packages/agent-core/orchestrator.ts`) and calls the model through the
+OpenAI-compatible chat completions API with tool calling, with no server in
+between. Every tool executes locally; there is no shell and no network tool, and
+scraped pages are treated as untrusted input.
 
 See **[ARCHITECTURE.md](./ARCHITECTURE.md)** for the event flow, the layout, and
 the gotchas worth knowing.
@@ -142,11 +166,11 @@ harness               Bun scripts that run agent-core outside Chrome, and test t
 ```bash
 pnpm dev                 # WXT with hot reload
 pnpm typecheck           # all packages
-pnpm test                # unit tests (no API calls; needs Bun)
+pnpm test                # unit tests incl. the agent loop against a mock fetch (no API calls; needs Bun, or `npx -y bun test harness/`)
 pnpm extension:test      # loads the built extension into headless Chrome (no API calls)
 
-cp .env.example .env     # add ANTHROPIC_API_KEY, then:
-pnpm agent:run           # a full build against the real API, with fixture history
+cp .env.example .env     # add OPENROUTER_API_KEY, then:
+pnpm agent:run           # a full build against the real API (spends credits), with fixture history
 pnpm agent:verify        # check the output actually renders
 ```
 
@@ -158,4 +182,5 @@ the stored API key.
 
 ## License
 
-MIT
+MIT. Original work © Thariq Shihipar ([ThariqS/ai-newtab](https://github.com/ThariqS/ai-newtab));
+OpenRouter port in this fork by [uabali](https://github.com/uabali).
