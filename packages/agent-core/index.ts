@@ -3,5 +3,7 @@ export * from "./schemas";
 export * from "./history-digest";
 export * from "./prompt";
 export * from "./setup";
+export * from "./llm";
+export * from "./workspace";
 export * from "./orchestrator";
 export * from "./site-filter";

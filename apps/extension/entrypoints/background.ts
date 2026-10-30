@@ -3,13 +3,13 @@ import { AGENT_PORT } from "@/lib/protocol";
 
 /**
  * The service worker is the build host. It owns the agent loop (BuildManager),
- * holds the Anthropic session stream, runs the browser tools in-process, and
+ * runs the model loop against OpenRouter, runs every tool in-process, and
  * drives the scheduled rebuild from an alarm.
  *
  * New-tab pages are thin views that connect on AGENT_PORT. Closing every tab
  * doesn't stop a build: the worker keeps itself warm during an active turn, and
- * the alarm heartbeat reattaches to an interrupted session after an unexpected
- * kill.
+ * the alarm heartbeat resumes an interrupted build from its local checkpoint
+ * after an unexpected kill.
  */
 const HEARTBEAT_ALARM = "homepage-heartbeat";
 

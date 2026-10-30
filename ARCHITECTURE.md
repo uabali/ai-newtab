@@ -1,52 +1,69 @@
 # Architecture
 
-There is no server. Three parties are involved, and you run one of them.
+There is no server. Two parties are involved, and you run one of them.
 
 | | Runs where | Does what |
 |---|---|---|
-| **Extension** (service worker) | Your browser | Hosts the build: holds the SSE stream, executes `getHistory` / `getPageHtml`, uploads page HTML, persists the homepage |
+| **Extension** (service worker) | Your browser | Runs the agent loop, executes every tool (`getHistory`, `getPageHtml`, `read`, `grep`, `glob`, `write`), holds the scraped pages in memory, persists checkpoints and the homepage |
 | **Extension** (new-tab page(s)) | Your browser | Thin view: subscribes to the worker over a port, renders live progress and the finished homepage |
-| **Orchestration layer** | Anthropic | Runs the agent loop, persists the session event log, emits `agent.custom_tool_use` |
-| **Session sandbox** | Anthropic | Runs `read` / `grep` / `glob` / `write` over the mounted pages |
+| **Model endpoint** | OpenRouter (or your base URL) | Stateless `POST /chat/completions` with `tools`; returns text and `tool_calls` |
 
-The agent loop runs **in the service worker** (`apps/extension/lib/build-manager.ts`), so a build
-survives closing the tab, shows up in every open tab, and can run headless on a
-`chrome.alarms` schedule. The two custom tools execute in the extension too, because they
-need `chrome.history` and `chrome.tabs`. Anthropic never executes them — it emits an event
-and waits for a `user.custom_tool_result` on the same authenticated stream. There is no
-inbound connection and no public endpoint.
+The agent loop runs **in the service worker** (`apps/extension/lib/build-manager.ts` →
+`packages/agent-core/orchestrator.ts`), so a build survives closing the tab, shows up in
+every open tab, and can run headless on a `chrome.alarms` schedule. The model never
+executes anything: it returns `tool_calls`, the worker runs them and sends the results
+back as `role: "tool"` messages in the next request. There is no inbound connection and
+no public endpoint.
 
 ```
-service worker        Anthropic loop        sandbox
-    │                       │                  │
-    ├─ sessions.create ────▶│                  │
-    ├─ events.stream ──────▶│  (open first)    │
-    ├─ user.message ───────▶│                  │
-    │◀─ custom_tool_use ────┤  getHistory      │
-    ├─ chrome.history ──────┤                  │
-    ├─ custom_tool_result ─▶│                  │
-    │◀─ custom_tool_use ────┤  getPageHtml     │
-    ├─ tabs + scripting     │                  │
-    ├─ files.upload ───────────────────────────▶
-    ├─ resources.add ──────────────────────────▶  mounts /mnt/session/uploads/pages/*.html
-    ├─ custom_tool_result ─▶│                  │
-    │                       ├─ grep / read ───▶│
-    │◀─ agent.message ──────┤                  │
-    │◀─ status_idle ────────┤  end_turn        │
-    ├─ files.list(scope_id) ───────────────────▶  /mnt/session/outputs/homepage.tsx
-    └─ sessions.delete ────▶│                  │
+service worker                                   OpenRouter
+    │                                                │
+    ├─ POST /chat/completions (system, kickoff, tools)▶
+    │◀─ tool_calls: getHistory ──────────────────────┤
+    ├─ chrome.history → digest                       │
+    ├─ POST (… + tool result) ──────────────────────▶│
+    │◀─ tool_calls: getPageHtml(urls) ───────────────┤
+    ├─ tabs + scripting → /pages/*.html (in memory)  │
+    ├─ POST (… + "fetched N pages, use grep/read") ─▶│
+    │◀─ tool_calls: grep / read / glob ──────────────┤
+    ├─ in-memory search, truncated results           │
+    ├─ POST … ──────────────────────────────────────▶│
+    │◀─ tool_calls: write /outputs/homepage.tsx ─────┤
+    ├─ POST … ──────────────────────────────────────▶│
+    │◀─ finish_reason: stop ─────────────────────────┤
+    └─ return /outputs/homepage.tsx, clear checkpoint
 ```
+
+### The loop (`packages/agent-core`)
+
+- `llm.ts`: a minimal OpenAI-compatible client with an injectable `fetch`. Non-streaming;
+  retries 408/409/425/429/5xx, network errors and 200-responses carrying an `error` body
+  (OpenRouter does this when an upstream provider fails). Sends `Authorization: Bearer`,
+  `HTTP-Referer` and `X-Title`. The base URL must be `https://` and must not contain
+  credentials.
+- `workspace.ts`: the in-memory file system. Scraped pages go to `/pages/<slug>_<n>.html`
+  (a line break before each block-level tag, so `grep`/`read` return a headline with its link, capped at 400k chars each). `write` is
+  only allowed under `/outputs/` with a `.tsx/.jsx/.ts/.js` extension, and supports
+  `append` so small-output models can write the component in chunks.
+- `orchestrator.ts`: `runHomepageBuild`. Up to 40 model steps. Tool results are truncated
+  to 12k chars; once the conversation passes ~120k chars the oldest tool results (and old
+  `write` arguments) are replaced with a short placeholder, so small-context models keep
+  working. If the model stops without writing the deliverable it is nudged (twice at most);
+  as a last resort a ```tsx fence containing `PersonalizedHomepage` in the final message
+  is accepted.
 
 ### Keeping the worker alive
 
 An MV3 service worker is torn down after ~30s idle, and a build spends most of its
 wall clock waiting on the model. Three things keep it alive or bring it back:
 
-- **During a turn**, the in-flight session fetch plus a 20s self-ping
+- **During a turn**, the in-flight fetch plus a 20s self-ping
   (`runtime.getPlatformInfo`) reset the idle timer.
-- **A 1-minute alarm heartbeat** calls `BuildManager.tick()`. If an
-  `activeSessionId` is in storage, the worker reattaches: the orchestrator replays
-  the session's event log, re-answers any tool call left hanging, and finishes.
+- **A 1-minute alarm heartbeat** calls `BuildManager.tick()`. After every tool turn the
+  orchestrator saves a checkpoint (messages, workspace files, step counters, model) under
+  `activeRunCheckpoint`, with the run id in `activeSessionId`. If the worker was killed,
+  the heartbeat finds them and resumes from the checkpoint without re-scraping. Both keys
+  are removed when a build ends, successfully or not.
 - **The same heartbeat** drives scheduled rebuilds (`lib/auto-rebuild.ts`), so the
   first new tab of the day already shows a fresh homepage.
 
@@ -55,20 +72,28 @@ wall clock waiting on the model. Three things keep it alive or bring it back:
 Each new tab connects on a port (`lib/protocol.ts`), receives a snapshot of the
 build state, then streams phase/text/log deltas. Every open tab shows the same live
 run. A throttled snapshot is also mirrored to storage so a tab opened while the
-worker is asleep paints instantly.
+worker is asleep paints instantly. Responses are not streamed, so narration appears
+one model turn at a time.
 
 The finished component renders inside a Sandpack iframe
 (`entrypoints/newtab/components/HomepagePreview.tsx`): it is model-written code, so
 it runs sandboxed, not in the extension's own page.
 
+The extension's own UI (key screen, Settings, toolbar, build progress) uses Tailwind
+v4 and shadcn/ui components on Radix primitives (`components/ui/`). Those styles
+apply only to the new-tab document; the homepage renders in Sandpack's cross-origin
+iframe, a separate document, so Tailwind's reset and utilities never reach it.
+
 ## Layout
 
 ```
 packages/agent-core/      host-agnostic agent loop — imports no chrome.*, browser.*, or node:*
-  orchestrator.ts         runHomepageBuild: session lifecycle, event loop, tool dispatch, cleanup
-  setup.ts                ensureAgent / ensureEnvironment (created once, cached by ID)
+  orchestrator.ts         runHomepageBuild: local tool-calling loop, checkpoint/resume, truncation
+  llm.ts                  OpenAI-compatible chat client (OpenRouter by default)
+  workspace.ts            in-memory /pages and /outputs with read / grep / glob / write
+  setup.ts                default model, model suggestions, storage keys
   prompt.ts               system prompt + per-build kickoff message
-  schemas.ts              custom tool input schemas and defaults
+  schemas.ts              tool input schemas and defaults
   history-digest.ts       narrows raw history to fit a tool result
   types.ts                BrowserBridge, KVStore, RunPhase, …
 
@@ -77,6 +102,7 @@ apps/extension/           MV3 extension (WXT + React)
     background.ts         service worker: hosts BuildManager, alarm heartbeat
     scraper.content.ts    injected into scraped tabs: scroll, return HTML
     newtab/               the new-tab UI (thin client onto the worker)
+  components/ui/          shadcn/ui components (Radix + Tailwind) used by the new-tab UI
   lib/
     build-manager.ts      single-flight build host, broadcast, keepalive, reattach
     browser-bridge.ts     BrowserBridge over chrome.history / chrome.tabs
@@ -86,77 +112,57 @@ apps/extension/           MV3 extension (WXT + React)
     auto-rebuild.ts       when to rebuild on a schedule
     storage.ts            every chrome.storage key, settings, saved homepage
     transpile.ts          TSX → JS for the preview
+    model-catalog.ts      model picker: presets + OpenRouter's public tool-calling list
+    utils.ts              cn() class-name helper for the UI components
 
-harness/                  Bun scripts: drive agent-core with a fixture/fetch bridge, test the extension
+harness/                  Bun scripts: mock-fetch tests of the loop, a real-API runner, extension test,
+                          screenshots (headless Chrome, dummy key, no model calls)
 ```
 
 ## Verification
 
 | Command | Proves |
 |---|---|
-| `pnpm test` | The history digest is capped, ranked, drops `urls[]`, reports `totalSitesSeen` |
-| `pnpm agent:run` | Full build against the real API: tools, mounting, sandbox grep/read, deliverable, cleanup |
+| `pnpm test` | History digest; blocked-site / private-IP filtering through the real loop; the agent loop against a mock `fetch` (request shape, tools, append, nudges, fence fallback, truncation, compaction, retries, 401, abort, checkpoint → resume) |
+| `pnpm agent:run` | Full build against the real API with fixture history (needs `OPENROUTER_API_KEY`, spends credits) |
 | `pnpm agent:verify` | The deliverable transforms, evaluates and server-renders |
-| `pnpm agent:resume-test` | A build killed with a tool call pending can be reattached and finished |
-| `pnpm agent:retention <sessionId>` | The session and every uploaded page body are actually deleted |
 | `pnpm extension:test` | In headless Chrome: worker registers, new tab renders, port protocol answers, `chrome.history` reads |
 
-The `agent:*` commands need `ANTHROPIC_API_KEY` in `.env` and spend API credits. The
-harness's bridge uses fixture history and a plain `fetch`, so it can't see
+The harness's bridge uses fixture history and a plain `fetch`, so it can't see
 logged-in pages — that's the whole reason `getPageHtml` runs in your browser.
-
-## Gotchas worth knowing
-
-**`mount_path` is always re-rooted under `/mnt/session/uploads/`.** A leading `/` is
-stripped, not honored — both at session-create time and via `resources.add()`:
-
-| requested | resolved |
-|---|---|
-| `/workspace/pages/x.html` | `/mnt/session/uploads/workspace/pages/x.html` |
-| `/mnt/session/uploads/x.html` | `/mnt/session/uploads/x.html` |
-| *(omitted)* | `/mnt/session/uploads/<file_id>` |
-
-Always report `resource.mount_path` from the response back to the model, never the
-path you asked for, or it greps a file that isn't there.
-
-**The result event field is `custom_tool_use_id`**, not `tool_use_id`. (`tool_use_id`
-belongs to `user.tool_confirmation` and `user.tool_result`.)
-
-**Never leave an `agent.custom_tool_use` unanswered.** Every path out of the handler
-must send a result — a thrown error becomes a result with `is_error: true`, never a
-reason to skip the send. An unanswered tool call idles the session forever.
-
-**Don't break on `session.status_idle` alone.** The session idles every time it waits
-for a tool result. Break only on `status_terminated`, or on `status_idle` where
-`stop_reason.type !== "requires_action"`. And run the terminal check for *every* event,
-including deduped ones — `continue`-ing on a duplicate can skip the terminal event that
-arrived in the history fetch.
-
-**`event_start` / `event_delta` stream events carry no `id`.** Skip them before dedupe.
-
-**`files.upload()` takes no `purpose`.** Just `{ file }`.
 
 ## Privacy
 
 The editable blocked-sites list is enforced in agent-core's tool handlers, not
 just the prompt: blocked domains are excluded from history digests and their
 counts, and blocked or non-HTTP(S) page requests never reach the browser bridge.
-Each scraped page's final URL is checked again before upload, so a redirect onto
-a blocked host is dropped: the browser still loads it, but nothing it read is
-sent. Loopback, private-IP and local-network hosts are always blocked, whatever
-the list says. A name can still resolve to a private address (`fritz.box`, an
+Each scraped page's final URL is checked again before it enters the workspace, so a
+redirect onto a blocked host is dropped: the browser still loads it, but nothing it
+read is sent. Loopback, private-IP and local-network hosts are always blocked,
+whatever the list says. A name can still resolve to a private address (`fritz.box`, an
 intranet name), so the scraper also records the address each page was served
-from (`webRequest`, observe only) and the page is dropped before upload when it is
-private. That address is only reported when the extension's own API requests
-connect to a public address; behind a proxy at a private address, or when Chrome
-reports no address, the name check is all there is. History digests still list
+from (`webRequest`, observe only) and the page is dropped when it is private. That
+address is only reported when the extension's own requests to the configured model
+endpoint connect to a public address; behind a proxy at a private address, or when
+Chrome reports no address, the name check is all there is. History digests still list
 such a domain. Subresource loads are not intercepted.
 
-The session event log persists every domain, title and scraped page body server-side
-until deleted, and uploaded files persist independently. `runHomepageBuild` deletes
-both in a `finally`. Confirm retention/ZDR eligibility against current docs before
-distributing this.
+Data leaves the browser only in requests to the configured endpoint (OpenRouter by
+default). The one other request is the model picker's anonymous `GET
+https://openrouter.ai/api/v1/models?supported_parameters=tools`
+(`lib/model-catalog.ts`): sent only when the endpoint is OpenRouter and the picker is
+opened, with no key, cookies, referrer or user data; on failure the presets are shown. Nothing is stored server-side by the extension, but OpenRouter and the
+upstream model provider each have their own logging/retention policies (free
+endpoints in particular may log prompts). Check them before pointing this at private
+pages. Locally, a checkpoint with the scraped pages sits in `chrome.storage.local`
+until the build ends.
 
 The API key lives in `chrome.storage.local`, readable by anyone with access to the
 browser profile. Fine for a tool you run yourself; **do not ship this to the Web Store**
-without moving the key behind a proxy.
+without moving the key behind a proxy. Consider a spending limit on the OpenRouter key.
+
+## Credits
+
+Original design and implementation: [ThariqS/ai-newtab](https://github.com/ThariqS/ai-newtab)
+(MIT). This fork replaces the Claude Managed Agents session with a local loop over
+OpenRouter.

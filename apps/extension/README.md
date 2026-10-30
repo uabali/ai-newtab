@@ -9,6 +9,7 @@ pnpm dev         # hot-reload dev build
 pnpm typecheck
 ```
 
-- `entrypoints/background.ts`: the service worker that hosts the build
-- `entrypoints/newtab/`: the new-tab UI, a thin client onto the worker
-- `lib/`: the build manager, the two browser tools, storage and the page↔worker protocol
+- `entrypoints/background.ts`: the service worker that hosts the build (the local agent loop talking to OpenRouter)
+- `entrypoints/newtab/`: the new-tab UI, a thin client onto the worker (API key, model and base URL live in Settings)
+- `components/ui/`: shadcn/ui components (Radix primitives + Tailwind v4) for the new-tab UI; styles stay out of the Sandpack homepage iframe
+- `lib/`: the build manager, the two browser tools, storage, the page↔worker protocol, and `model-catalog.ts` (the anonymous public model list behind the model picker)

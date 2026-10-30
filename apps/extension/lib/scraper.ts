@@ -34,11 +34,30 @@ const DEFAULT_OPTIONS: Required<ScrapeOptions> = {
  * says nothing about the page's host and is not reported.
  */
 let apiAddress: string | undefined;
+/** Origin of the configured model endpoint (OpenRouter unless changed in Settings). */
+let apiOrigin = "https://openrouter.ai";
+
+/** Called by the build manager with the endpoint a build is about to use. */
+export function setApiOrigin(baseUrl: string) {
+  try {
+    const origin = new URL(baseUrl).origin;
+    if (origin !== apiOrigin) apiAddress = undefined;
+    apiOrigin = origin;
+  } catch {
+    // normalizeBaseUrl already rejected anything unparsable.
+  }
+}
+
 browser.webRequest.onResponseStarted.addListener(
   (details) => {
-    apiAddress = details.ip;
+    try {
+      if (new URL(details.url).origin === apiOrigin) apiAddress = details.ip;
+    } catch {
+      // ignore
+    }
   },
-  { urls: ["https://api.anthropic.com/*"], tabId: -1 },
+  // The extension's own (non-tab) requests; only the model endpoint's are kept above.
+  { urls: ["https://*/*"], tabId: -1 },
 );
 
 /** Keep content and links; drop scripts, styles, attributes and empty wrappers. */

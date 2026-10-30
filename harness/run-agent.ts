@@ -1,23 +1,27 @@
 /**
- * End-to-end build against the real API (needs ANTHROPIC_API_KEY in .env).
+ * End-to-end build against the real API (needs OPENROUTER_API_KEY in .env).
+ * This spends credits on the chosen model; it is NOT part of `pnpm test`.
  *
  * Exercises the exact orchestrator the extension runs, with a fixture/fetch
- * bridge standing in for chrome.history and chrome.tabs. Verifies: agent +
- * environment reuse, session lifecycle, custom-tool dispatch, mid-session file
- * mounting, sandbox grep/read, the written deliverable, and cleanup.
+ * bridge standing in for chrome.history and chrome.tabs. Verifies: the local
+ * tool-calling loop, tool dispatch, in-memory grep/read, the written
+ * deliverable, and checkpoint cleanup.
  *
+ * Optional env: OPENROUTER_MODEL, OPENROUTER_BASE_URL, HOMEPAGE_PROMPT.
  * Run: pnpm agent:run
  */
-import Anthropic from "@anthropic-ai/sdk";
-import { runHomepageBuild } from "@homepage/agent-core";
+import { createChatClient, normalizeBaseUrl, normalizeModelId, runHomepageBuild } from "@homepage/agent-core";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { FileKVStore, OUT_DIR, OUT_PATH, STATE_PATH, nodeBridge } from "./node-bridge";
 
 async function main() {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) throw new Error("ANTHROPIC_API_KEY is not set (put it in .env)");
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) throw new Error("OPENROUTER_API_KEY is not set (put it in .env)");
 
-  const client = new Anthropic({ apiKey });
+  const baseUrl = normalizeBaseUrl(process.env.OPENROUTER_BASE_URL);
+  const model = normalizeModelId(process.env.OPENROUTER_MODEL);
+  const llm = createChatClient({ apiKey, baseUrl });
+  console.log(`model ${model} via ${baseUrl}`);
   const store = new FileKVStore(STATE_PATH);
 
   mkdirSync(OUT_DIR, { recursive: true });
@@ -26,7 +30,8 @@ async function main() {
   let lastPhase = "";
 
   const result = await runHomepageBuild({
-    client,
+    llm,
+    model,
     bridge: nodeBridge,
     store,
     userSystemPrompt: process.env.HOMEPAGE_PROMPT,
@@ -46,7 +51,7 @@ async function main() {
   writeFileSync(OUT_PATH, result.code);
 
   console.log("\n\n========== RESULT ==========");
-  console.log(`session      : ${result.sessionId}`);
+  console.log(`run          : ${result.sessionId}`);
   console.log(`source       : ${result.source}`);
   console.log(`code length  : ${result.code.length} bytes`);
   console.log(`elapsed      : ${elapsed}s`);

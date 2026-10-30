@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from "react";
+import { ArrowLeftIcon, CheckIcon } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { BUILD_STEPS, LOG_RETENTION, type BuildState } from "@/lib/protocol";
+import { cn } from "@/lib/utils";
 
 /** Full-screen build view: the step list on the left, live narration and log on the right. */
 export function BuildProgress({
@@ -34,61 +37,99 @@ export function BuildProgress({
   const ss = String(elapsed % 60).padStart(2, "0");
 
   return (
-    <div className="build">
-      <div className="build-left">
-        <div className="build-panel">
-          <div className="build-top">
-            <span className="build-title">Building your homepage</span>
-            <span className="build-elapsed">
+    <div className="grid min-h-screen w-screen grid-cols-1 bg-background text-foreground md:h-screen md:grid-cols-2">
+      <section className="flex min-h-0 justify-center px-6 py-10 md:justify-end md:px-14 md:py-16">
+        <div className="flex w-full max-w-md min-h-0 flex-col">
+          <div className="mb-8 flex items-center justify-between">
+            <h1 className="text-xl font-semibold tracking-tight">Building your homepage</h1>
+            <span className="rounded-full border bg-muted px-3 py-1 font-mono text-xs text-muted-foreground tabular-nums">
               {mm}:{ss}
             </span>
           </div>
 
-          <ol className="build-steps">
+          <ol className="flex flex-col">
             {BUILD_STEPS.map((step, i) => {
               const status = i < stepIndex ? "done" : i === stepIndex ? "active" : "pending";
+              const last = i === BUILD_STEPS.length - 1;
               return (
-                <li key={step.label} className={`build-step ${status}`}>
-                  <span className="build-marker">{status === "done" ? "✓" : i + 1}</span>
-                  <div className="build-step-body">
-                    <div className="build-step-label">{step.label}</div>
-                    {status === "active" && detail && <div className="build-step-detail">{detail}</div>}
+                <li key={step.label} className={cn("relative grid grid-cols-[28px_1fr] gap-3.5", !last && "pb-6")}>
+                  {!last && (
+                    <span
+                      aria-hidden
+                      className={cn(
+                        "absolute top-7 bottom-0 left-[13px] w-0.5",
+                        status === "done" ? "bg-emerald-500/40" : "bg-border",
+                      )}
+                    />
+                  )}
+                  <span
+                    className={cn(
+                      "z-10 grid size-7 place-items-center rounded-full border-2 text-xs font-bold transition-colors",
+                      status === "done" && "border-emerald-600 bg-emerald-600 text-white",
+                      status === "active" &&
+                        "border-primary bg-primary/10 text-primary motion-safe:[animation:hb-ring_1.8s_ease-in-out_infinite]",
+                      status === "pending" && "border-border bg-background text-muted-foreground",
+                    )}
+                  >
+                    {status === "done" ? <CheckIcon className="size-3.5" /> : i + 1}
+                  </span>
+                  <div className="pt-0.5">
+                    <div
+                      className={cn(
+                        "text-[15px] font-medium",
+                        status === "pending" ? "text-muted-foreground" : "text-foreground",
+                        status === "active" && "font-semibold",
+                      )}
+                    >
+                      {step.label}
+                    </div>
+                    {status === "active" && detail && (
+                      <div className="mt-0.5 font-mono text-xs text-muted-foreground">{detail}</div>
+                    )}
                   </div>
                 </li>
               );
             })}
           </ol>
 
-          <div style={{ display: "flex", gap: 10 }}>
-            <button className="build-cancel" onClick={onCancel}>
+          <div className="mt-9 flex gap-2.5">
+            <Button variant="outline" onClick={onCancel} className="hover:border-destructive hover:text-destructive">
               Cancel
-            </button>
+            </Button>
             {onBack && (
-              <button className="build-cancel" style={{ background: "transparent" }} onClick={onBack}>
-                ← Back to homepage
-              </button>
+              <Button variant="ghost" onClick={onBack}>
+                <ArrowLeftIcon /> Back to homepage
+              </Button>
             )}
           </div>
         </div>
-      </div>
+      </section>
 
-      <div className="build-right">
-        <div className="build-panel">
-          <div className="build-eyebrow">Agent</div>
-          <div className="build-narration" ref={narrRef}>
+      <section className="flex min-h-0 justify-center border-t bg-muted/50 px-6 py-10 md:justify-start md:border-t-0 md:border-l md:px-14 md:py-16">
+        <div className="flex w-full max-w-md min-h-0 flex-col">
+          <div className="mb-2.5 text-[11px] font-semibold tracking-[0.12em] text-muted-foreground uppercase">Agent</div>
+          <div
+            ref={narrRef}
+            className="max-h-[42vh] flex-[0_1_auto] overflow-y-auto rounded-xl border bg-card px-5 py-4 text-[15px] leading-relaxed whitespace-pre-wrap shadow-xs"
+          >
             {narration || "Warming up — reading what you’ve been browsing…"}
           </div>
 
           {logs.length > 0 && (
             <>
-              <div className="build-eyebrow build-log-label">Activity log</div>
-              <pre className="build-log" ref={logRef}>
+              <div className="mt-5 mb-2.5 text-[11px] font-semibold tracking-[0.12em] text-muted-foreground uppercase">
+                Activity log
+              </div>
+              <pre
+                ref={logRef}
+                className="m-0 min-h-[90px] flex-1 overflow-auto rounded-xl bg-zinc-950 px-4 py-3.5 font-mono text-xs leading-relaxed break-words whitespace-pre-wrap text-emerald-300"
+              >
                 {logs.slice(-LOG_RETENTION).join("\n")}
               </pre>
             </>
           )}
         </div>
-      </div>
+      </section>
     </div>
   );
 }

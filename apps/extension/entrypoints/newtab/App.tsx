@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
+import { toast } from "sonner";
+import { RefreshCwIcon, RotateCcwIcon, SettingsIcon, SparklesIcon, XIcon } from "lucide-react";
 import { DEFAULT_MODEL, DEFAULT_BLOCKED_SITES, type HomepageModel } from "@homepage/agent-core";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
+import { Toaster } from "@/components/ui/sonner";
 import { BUILD_STEPS } from "@/lib/protocol";
 import { KEYS, extensionStore, loadHomepage, loadSettings, saveSetting } from "@/lib/storage";
 import { toRenderable } from "@/lib/transpile";
@@ -7,15 +13,24 @@ import { ApiKeySetup } from "./components/ApiKeySetup";
 import { BuildProgress } from "./components/BuildProgress";
 import { HomepagePreview } from "./components/HomepagePreview";
 import { SettingsModal } from "./components/SettingsModal";
-import { btn, errorBox } from "./components/ui";
 import { useHomepageBuild } from "./useHomepageBuild";
 
 export default function App() {
+  return (
+    <>
+      <Screen />
+      <Toaster position="bottom-right" />
+    </>
+  );
+}
+
+function Screen() {
   const [loading, setLoading] = useState(true);
   const [apiKey, setApiKey] = useState<string | null>(null);
   const [systemPrompt, setSystemPrompt] = useState("");
   const [blockedSites, setBlockedSites] = useState<string[]>(DEFAULT_BLOCKED_SITES);
   const [model, setModel] = useState<HomepageModel>(DEFAULT_MODEL);
+  const [baseUrl, setBaseUrl] = useState("");
   const [autoRebuild, setAutoRebuild] = useState(true);
   /** Transpiled homepage, ready for Sandpack. */
   const [renderedCode, setRenderedCode] = useState<string | null>(null);
@@ -48,6 +63,7 @@ export default function App() {
         setSystemPrompt(settings.systemPrompt);
         setBlockedSites(settings.blockedSites);
         setModel(settings.model);
+        setBaseUrl(settings.baseUrl);
         setAutoRebuild(settings.autoRebuild);
         setResumable(activeSession ?? null);
         if (homepage?.code) setRenderedCode(toRenderable(homepage.code));
@@ -60,6 +76,7 @@ export default function App() {
   const saveKey = useCallback(async (key: string) => {
     await saveSetting("apiKey", key);
     setApiKey(key);
+    toast.success("API key saved");
   }, []);
 
   const savePrompt = useCallback(
@@ -69,6 +86,7 @@ export default function App() {
       setSystemPrompt(prompt);
       setShowSettings(false);
       setRenderedCode(null);
+      toast.success("Settings saved, rebuilding");
       build();
     },
     [build],
@@ -78,14 +96,39 @@ export default function App() {
   const changeModel = useCallback(async (next: HomepageModel) => {
     setModel(next);
     await saveSetting("model", next);
+    toast.success("Model saved", { description: next });
+  }, []);
+  const changeBaseUrl = useCallback(async (next: string) => {
+    setBaseUrl(next);
+    await saveSetting("baseUrl", next);
+  }, []);
+  const changeApiKey = useCallback(async (next: string) => {
+    setApiKey(next);
+    await saveSetting("apiKey", next);
   }, []);
   const toggleAutoRebuild = useCallback(async (next: boolean) => {
     setAutoRebuild(next);
     await saveSetting("autoRebuild", next);
   }, []);
 
-  if (loading) return <div style={{ padding: 20, textAlign: "center" }}>Loading…</div>;
+  if (loading) return <div className="p-5 text-center text-sm text-muted-foreground">Loading…</div>;
   if (!apiKey) return <ApiKeySetup onSave={saveKey} />;
+
+  const settings = showSettings && (
+    <SettingsModal
+      initialPrompt={systemPrompt}
+      blockedSites={blockedSites}
+      model={model}
+      onChangeModel={changeModel}
+      baseUrl={baseUrl}
+      onChangeBaseUrl={changeBaseUrl}
+      onChangeApiKey={changeApiKey}
+      autoRebuild={autoRebuild}
+      onToggleAutoRebuild={toggleAutoRebuild}
+      onClose={() => setShowSettings(false)}
+      onSave={savePrompt}
+    />
+  );
 
   // With no homepage to fall back to, a running build takes over the tab.
   if (state.running && (!renderedCode || viewProgress)) {
@@ -100,116 +143,87 @@ export default function App() {
 
   if (!renderedCode) {
     return (
-      <div style={{ maxWidth: 560, margin: "14vh auto", padding: 24, fontFamily: "system-ui" }}>
-        <h1 style={{ fontSize: 26 }}>Build your homepage</h1>
-        <p style={{ color: "#555", lineHeight: 1.6 }}>
-          The agent reads your browsing history, opens the pages you actually follow, and writes a
-          homepage from what it finds today.
-        </p>
-        {state.error && (
-          <div style={{ ...errorBox, margin: "16px 0", padding: 12, borderRadius: 4 }}>{state.error}</div>
-        )}
-        <div style={{ display: "flex", gap: 12, marginTop: 16 }}>
-          <button style={btn} onClick={() => build()}>
-            Build today&apos;s homepage
-          </button>
-          {resumable && (
-            <button style={{ ...btn, backgroundColor: "#555" }} onClick={() => build({ resume: true })}>
-              Resume interrupted build
-            </button>
+      <main className="flex min-h-screen items-center justify-center bg-muted/40 p-6">
+        <Card className="w-full max-w-xl">
+          <CardHeader>
+            <div className="mb-2 flex size-10 items-center justify-center rounded-full bg-primary/10 text-primary">
+              <SparklesIcon className="size-5" />
+            </div>
+            <CardTitle className="text-2xl">Build your homepage</CardTitle>
+            <CardDescription className="leading-relaxed">
+              The agent reads your browsing history, opens the pages you actually follow, and writes a homepage from what
+              it finds today.
+            </CardDescription>
+          </CardHeader>
+          {state.error && (
+            <CardContent>
+              <Alert variant="destructive">
+                <AlertTitle>Build failed</AlertTitle>
+                <AlertDescription>{state.error}</AlertDescription>
+              </Alert>
+            </CardContent>
           )}
-        </div>
-      </div>
+          <CardFooter className="flex flex-wrap gap-3">
+            <Button onClick={() => build()}>Build today&apos;s homepage</Button>
+            {resumable && (
+              <Button variant="secondary" onClick={() => build({ resume: true })}>
+                <RotateCcwIcon /> Resume interrupted build
+              </Button>
+            )}
+            <Button variant="ghost" className="ml-auto" onClick={() => setShowSettings(true)}>
+              <SettingsIcon /> Settings
+            </Button>
+          </CardFooter>
+        </Card>
+        {settings}
+      </main>
     );
   }
 
   const showError = state.error && dismissedError !== state.error;
 
   return (
-    <div style={{ height: "100vh", width: "100vw" }}>
-      <div style={{ position: "fixed", top: 20, right: 20, zIndex: 999, display: "flex", gap: 8 }}>
+    <div className="h-screen w-screen">
+      <div className="fixed top-5 right-5 z-[999] flex gap-2">
         {state.running ? (
           // A build is running in the background (from here, another tab, or the
           // scheduled rebuild). Let the user watch it without losing this page.
-          <button
-            style={{ ...btn, backgroundColor: "#0a7", display: "flex", alignItems: "center", gap: 8 }}
+          <Button
+            className="bg-emerald-600 shadow-md hover:bg-emerald-600/90"
             onClick={() => setViewProgress(true)}
             title="View build progress"
           >
-            <span
-              style={{
-                width: 8,
-                height: 8,
-                borderRadius: "50%",
-                background: "white",
-                animation: "hb-pulse 1.2s ease-in-out infinite",
-              }}
-            />
+            <span className="size-2 rounded-full bg-white [animation:hb-pulse_1.2s_ease-in-out_infinite]" />
             Building… {Math.min(state.stepIndex + 1, BUILD_STEPS.length)}/{BUILD_STEPS.length}
-          </button>
+          </Button>
         ) : (
-          <button style={btn} onClick={() => build()} title="Rebuild now">
-            ↻ Rebuild
-          </button>
+          <Button className="shadow-md" onClick={() => build()} title="Rebuild now">
+            <RefreshCwIcon /> Rebuild
+          </Button>
         )}
-        <button style={btn} onClick={() => setShowSettings(true)} title="Customize homepage">
-          ⚙️ Settings
-        </button>
+        <Button variant="outline" className="shadow-md" onClick={() => setShowSettings(true)} title="Customize homepage">
+          <SettingsIcon /> Settings
+        </Button>
       </div>
 
       {showError && (
-        <div
-          style={{
-            ...errorBox,
-            position: "fixed",
-            top: 20,
-            left: 20,
-            right: 260,
-            zIndex: 999,
-            padding: "10px 14px",
-            borderRadius: 6,
-            display: "flex",
-            alignItems: "flex-start",
-            gap: 12,
-          }}
-        >
-          <span style={{ flex: 1 }}>
-            <b>Build failed.</b> {state.error}
-          </span>
-          <button style={{ ...btn, padding: "4px 10px", backgroundColor: "#a02620" }} onClick={() => build()}>
-            Retry
-          </button>
-          <button
-            onClick={() => setDismissedError(state.error)}
-            style={{
-              background: "transparent",
-              border: "none",
-              color: "#a02620",
-              cursor: "pointer",
-              fontSize: 16,
-              lineHeight: 1,
-            }}
-            title="Dismiss"
-          >
-            ✕
-          </button>
-        </div>
+        <Alert variant="destructive" className="fixed top-5 right-[300px] left-5 z-[999] bg-background shadow-md">
+          <AlertTitle>Build failed</AlertTitle>
+          <AlertDescription className="flex w-full items-start gap-3">
+            <span className="flex-1">{state.error}</span>
+            <Button size="sm" variant="destructive" onClick={() => build()}>
+              Retry
+            </Button>
+            <Button size="icon" variant="ghost" className="size-8" onClick={() => setDismissedError(state.error)} title="Dismiss">
+              <XIcon />
+            </Button>
+          </AlertDescription>
+        </Alert>
       )}
 
       <HomepagePreview code={renderedCode} />
 
-      {showSettings && (
-        <SettingsModal
-          initialPrompt={systemPrompt}
-          blockedSites={blockedSites}
-          model={model}
-          onChangeModel={changeModel}
-          autoRebuild={autoRebuild}
-          onToggleAutoRebuild={toggleAutoRebuild}
-          onClose={() => setShowSettings(false)}
-          onSave={savePrompt}
-        />
-      )}
+      {settings}
     </div>
   );
 }

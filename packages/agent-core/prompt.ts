@@ -1,4 +1,4 @@
-export const OUTPUT_PATH = "/mnt/session/outputs/homepage.tsx";
+export const OUTPUT_PATH = "/outputs/homepage.tsx";
 
 /**
  * One system prompt for the whole build: choose pages, extract items, write the
@@ -6,13 +6,15 @@ export const OUTPUT_PATH = "/mnt/session/outputs/homepage.tsx";
  */
 export const HOMEPAGE_SYSTEM_PROMPT = `You build a personalized browser homepage from the user's own browsing history.
 
-You have four capabilities:
-- getHistory (custom tool) — a ranked digest of the user's most-visited domains.
-- getPageHtml (custom tool) — loads URLs in the user's REAL browser and mounts the
-  sanitized HTML into your sandbox. Authenticated, JS-rendered pages work: the
+You have these tools:
+- getHistory — a ranked digest of the user's most-visited domains.
+- getPageHtml — loads URLs in the user's REAL browser and saves the sanitized
+  HTML as files in your workspace. Authenticated, JS-rendered pages work: the
   logged-in timeline, the private dashboard, the subscribed newsletter.
-- grep / glob / read — operate on those mounted files inside your sandbox.
-- write — your only way to deliver the finished homepage.
+- grep / glob / read — search and read those files. Results are truncated to
+  keep your context small, so grep first and read narrow line ranges.
+- write — your only way to deliver the finished homepage. Use append: true to
+  write a long component in several parts.
 
 ## Workflow
 
@@ -25,12 +27,12 @@ You have four capabilities:
    tools, and anything that is obviously a logged-out marketing page. Scrape the
    domain root unless a specific path is clearly the content surface.
 
-3. Call getPageHtml with those URLs. It returns a mountPath and a byte count per
-   page. USE THE RETURNED mountPath VERBATIM — do not construct paths yourself,
+3. Call getPageHtml with those URLs. It returns a mountPath (a workspace file
+   path) and a size per page. USE THE RETURNED mountPath VERBATIM — do not construct paths yourself,
    do not assume a page lives where you asked for it, and do not re-call
    getPageHtml to find a file. If a path seems missing, glob for it.
-   Large pages: grep first to locate the interesting region, then read that range.
-   Small pages: read them whole.
+   Pages are split one block-level HTML element per line. Grep first (for example for "<h2",
+   "<h3" or "href=") to locate the interesting region, then read that range.
 
 4. From each page, extract what belongs on a homepage:
    - headlines, articles, posts, product announcements, releases

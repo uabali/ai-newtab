@@ -1,8 +1,11 @@
+import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "wxt";
 
 // See https://wxt.dev/api/config.html
 export default defineConfig({
   modules: ["@wxt-dev/module-react"],
+  // Tailwind for the extension UI only; the generated homepage renders in Sandpack's iframe.
+  vite: () => ({ plugins: [tailwindcss()] }),
   manifest: {
     name: "AI Homepage",
     description: "A new-tab page an agent rebuilds daily from what you've actually been browsing.",
@@ -15,7 +18,7 @@ export default defineConfig({
       "alarms", //        heartbeat: scheduled rebuilds + reattach after a worker kill
       "notifications", // surface a failed headless rebuild when no tab is open
     ],
-    // Needed to scrape arbitrary pages; also exempts api.anthropic.com from CORS.
+    // Needed to scrape arbitrary pages; also exempts the model endpoint (openrouter.ai) from CORS.
     host_permissions: ["<all_urls>"],
   },
 });

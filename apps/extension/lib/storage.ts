@@ -1,8 +1,8 @@
 import {
-  DEFAULT_MODEL,
+  DEFAULT_BASE_URL,
   DEFAULT_BLOCKED_SITES,
-  MODEL_CHOICES,
   STORAGE_KEYS as AGENT_KEYS,
+  normalizeModelId,
   type HomepageModel,
   type KVStore,
 } from "@homepage/agent-core";
@@ -18,7 +18,10 @@ export const KEYS = {
   homepage: "homepageData",
   systemPrompt: "systemPrompt",
   blockedSites: "blockedSites",
-  model: "model",
+  /** Free-text OpenRouter model id. A new key: the old one held Anthropic model ids. */
+  model: "openRouterModel",
+  /** Optional OpenAI-compatible endpoint; empty means OpenRouter. */
+  baseUrl: "openRouterBaseUrl",
   autoRebuild: "autoRebuild",
   /** ISO timestamp of the last auto-build *attempted* (success or not). */
   lastAutoBuildAttempt: "lastAutoBuildAttempt",
@@ -38,6 +41,8 @@ export interface Settings {
   systemPrompt: string;
   blockedSites: string[];
   model: HomepageModel;
+  /** Empty string means the default, DEFAULT_BASE_URL. */
+  baseUrl: string;
   /** Unset means on — auto-rebuild is opt-out. */
   autoRebuild: boolean;
 }
@@ -62,20 +67,25 @@ export async function loadSettings(): Promise<Settings> {
     KEYS.systemPrompt,
     KEYS.blockedSites,
     KEYS.model,
+    KEYS.baseUrl,
     KEYS.autoRebuild,
   ]);
-  const model = s[KEYS.model] as string | undefined;
   return {
     apiKey: (s[KEYS.apiKey] as string | undefined) ?? null,
     systemPrompt: (s[KEYS.systemPrompt] as string | undefined) ?? "",
     blockedSites: (s[KEYS.blockedSites] as string[] | undefined) ?? [...DEFAULT_BLOCKED_SITES],
-    // Fall back if a stored model is no longer offered.
-    model: MODEL_CHOICES.find((m) => m.id === model)?.id ?? DEFAULT_MODEL,
+    model: normalizeModelId(s[KEYS.model] as string | undefined),
+    baseUrl: ((s[KEYS.baseUrl] as string | undefined) ?? "").trim(),
     autoRebuild: s[KEYS.autoRebuild] !== false,
   };
 }
 
-export async function saveSetting<K extends "apiKey" | "systemPrompt" | "blockedSites" | "model" | "autoRebuild">(
+/** The endpoint a build will talk to. */
+export function effectiveBaseUrl(settings: Pick<Settings, "baseUrl">): string {
+  return settings.baseUrl || DEFAULT_BASE_URL;
+}
+
+export async function saveSetting<K extends "apiKey" | "systemPrompt" | "blockedSites" | "model" | "baseUrl" | "autoRebuild">(
   key: K,
   value: Settings[K],
 ): Promise<void> {

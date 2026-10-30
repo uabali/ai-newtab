@@ -26,18 +26,13 @@ export interface GetHistoryResult {
   sites: SiteDigest[];
 }
 
-/** A page whose HTML now lives in the session sandbox rather than in context. */
+/** A page whose HTML now lives in the build's in-memory workspace rather than in context. */
 export interface PageRef {
   url: string;
   title: string;
-  /**
-   * The path the sandbox actually resolved, read back off the `resources.add()`
-   * response. Never the path we asked for — the API re-roots every file resource
-   * under `/mnt/session/uploads/`, so a requested `/workspace/x.html` lands at
-   * `/mnt/session/uploads/workspace/x.html`.
-   */
+  /** The workspace path the page was saved at (e.g. `/pages/example_com_0.html`). Use it verbatim with read/grep. */
   mountPath: string;
-  /** Lets the model choose grep-first over read-whole. */
+  /** Characters stored. Lets the model choose grep-first over read-whole. */
   bytes: number;
 }
 
@@ -71,7 +66,7 @@ export interface ScrapedPage {
 
 /**
  * The two capabilities only a real browser has. Everything else the agent needs
- * (a filesystem, grep, read) is supplied by the session sandbox.
+ * (a filesystem, grep, read) is supplied by agent-core's in-memory Workspace.
  */
 export interface BrowserBridge {
   getHistory(args: {
@@ -113,7 +108,8 @@ export interface RunCallbacks {
 
 export interface HomepageBuildResult {
   code: string;
+  /** The local build id (kept under this name so hosts written for the hosted version still work). */
   sessionId: string;
-  /** Where the code came from: a session output file, or a fenced block in the final message. */
+  /** Where the code came from: the written output file, or a fenced block in the final message. */
   source: "session-output" | "message-fence";
 }

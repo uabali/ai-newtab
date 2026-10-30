@@ -1,9 +1,29 @@
-import type Anthropic from "@anthropic-ai/sdk";
+/**
+ * The agent loop, run locally by whichever host imports it (the extension's
+ * service worker, or the Bun harness). It talks to one OpenAI-compatible
+ * `/chat/completions` endpoint (OpenRouter by default) and executes every tool
+ * itself:
+ *
+ *   getHistory, getPageHtml  → the host's BrowserBridge (chrome.history / tabs)
+ *   read, grep, glob, write  → an in-memory Workspace holding the scraped pages
+ *
+ * The output contract is unchanged from the hosted version: a
+ * HomepageBuildResult whose `code` is the TSX the model wrote to OUTPUT_PATH.
+ */
 import { buildHistoryDigest, slugifyUrl } from "./history-digest";
-import { OUTPUT_PATH, buildKickoffMessage } from "./prompt";
+import type { ChatClient, ChatMessage, ChatTool, ChatToolCall } from "./llm";
+import { HOMEPAGE_SYSTEM_PROMPT, OUTPUT_PATH, buildKickoffMessage } from "./prompt";
 import { DEFAULT_BLOCKED_SITES, isAllowedUrl, isBlocked, isPrivateAddress, normalizeBlockList } from "./site-filter";
-import { DEFAULTS } from "./schemas";
-import { STORAGE_KEYS, ensureAgent, ensureEnvironment, type HomepageModel } from "./setup";
+import {
+  DEFAULTS,
+  GET_HISTORY_SCHEMA,
+  GET_PAGE_HTML_SCHEMA,
+  GLOB_SCHEMA,
+  GREP_SCHEMA,
+  READ_SCHEMA,
+  WRITE_SCHEMA,
+} from "./schemas";
+import { DEFAULT_MODEL, STORAGE_KEYS, normalizeModelId, type HomepageModel } from "./setup";
 import type {
   BrowserBridge,
   GetHistoryResult,
@@ -14,9 +34,7 @@ import type {
   RunCallbacks,
   RunPhase,
 } from "./types";
-
-type SessionEvent = Anthropic.Beta.Sessions.BetaManagedAgentsSessionEvent;
-type CustomToolUse = Anthropic.Beta.Sessions.BetaManagedAgentsAgentCustomToolUseEvent;
+import { OUTPUTS_DIR, Workspace } from "./workspace";
 
 /** Callbacks with the optionality resolved, so call sites don't repeat `?.`. */
 interface Emit {
@@ -25,16 +43,21 @@ interface Emit {
   log(line: string): void;
 }
 
-const MANAGED_AGENTS_BETA = "managed-agents-2026-04-01";
-
-/** How many times a dropped session stream is reopened before the build gives up. */
-const MAX_STREAM_RECONNECTS = 20;
-
-/** Files mount under this root no matter what path you ask for. Ask for it directly. */
-const UPLOAD_ROOT = "/mnt/session/uploads";
+/** Defaults sized so a 32k-token model still fits a whole build. */
+export const LOOP_DEFAULTS = {
+  /** Model turns before the build gives up. */
+  maxSteps: 40,
+  /** Each tool result is cut to this many characters (~3k tokens). */
+  maxToolResultChars: 12_000,
+  /** When the conversation grows past this, the oldest tool results are elided (~30k tokens). */
+  contextBudgetChars: 120_000,
+  /** Times the model is reminded to call write when it stops without a deliverable. */
+  maxNudges: 2,
+} as const;
 
 export interface RunOptions {
-  client: Anthropic;
+  /** The OpenAI-compatible endpoint. See `createChatClient`. */
+  llm: ChatClient;
   bridge: BrowserBridge;
   store: KVStore;
   userSystemPrompt?: string;
@@ -43,278 +66,289 @@ export interface RunOptions {
    * so a list saved mid-build applies to the rest of that build.
    */
   blockedSites?: string[] | (() => Promise<string[]>);
-  /** Ignored when resuming: the session keeps the agent (and model) it started with. */
+  /** Any tool-calling model id the endpoint knows. Ignored when resuming: a build keeps its model. */
   model?: HomepageModel;
   callbacks?: RunCallbacks;
   signal?: AbortSignal;
-  /** Reattach to an existing session instead of creating one (e.g. after the host was killed mid-run). */
+  /** Continue a build left mid-flight (e.g. after the worker was killed) from its checkpoint. */
   resumeSessionId?: string;
   now?: Date;
+  maxSteps?: number;
+  maxToolResultChars?: number;
+  contextBudgetChars?: number;
+  /** Sent as `max_tokens` when set. */
+  maxTokens?: number;
+}
+
+/** Everything needed to pick a build back up. Lives in the host's KVStore, never on a server. */
+export interface RunCheckpoint {
+  id: string;
+  model: HomepageModel;
+  messages: ChatMessage[];
+  files: Record<string, string>;
+  steps: number;
+  nudges: number;
+  finalMessage: string;
+}
+
+function tool(name: string, description: string, parameters: ChatTool["function"]["parameters"]): ChatTool {
+  return { type: "function", function: { name, description, parameters } };
+}
+
+export const HOMEPAGE_TOOLS: ChatTool[] = [
+  tool(
+    "getHistory",
+    "Returns a ranked digest of the user's most-visited domains over a recent window: visit counts, " +
+      "unique page counts, last-visit timestamps, relevance scores, and a few sample page titles per domain. " +
+      "Call this first, once.",
+    GET_HISTORY_SCHEMA,
+  ),
+  tool(
+    "getPageHtml",
+    "Loads URLs in the user's real, logged-in browser, sanitizes the HTML, and saves each page as a file in " +
+      "your workspace. Returns a mountPath and size per page plus a list of failures. Use grep/read on the " +
+      "returned mountPath. It sees authenticated, JavaScript-rendered pages that an anonymous fetch cannot.",
+    GET_PAGE_HTML_SCHEMA,
+  ),
+  tool("read", "Read a line range of a workspace file. Output is numbered and truncated.", READ_SCHEMA),
+  tool("grep", "Search workspace files line by line with a regular expression. Returns path:line: text.", GREP_SCHEMA),
+  tool("glob", "List workspace files matching a glob, with their sizes.", GLOB_SCHEMA),
+  tool("write", `Write the finished component to ${OUTPUT_PATH}. Supports append for long files.`, WRITE_SCHEMA),
+];
+
+export function truncate(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}\n…[truncated ${text.length - max} chars]` : text;
+}
+
+const ELIDED = "[Earlier tool result removed to save context. Call the tool again if you still need it.]";
+
+function messageChars(m: ChatMessage): number {
+  let n = typeof m.content === "string" ? m.content.length : 0;
+  if (m.role === "assistant") for (const c of m.tool_calls ?? []) n += c.function.arguments.length;
+  return n;
+}
+
+/**
+ * Keep the conversation under budget for small-context models: elide the
+ * oldest tool results first, then the bodies of earlier write calls (the file
+ * itself stays in the workspace). The last few messages are never touched.
+ */
+export function compactMessages(messages: ChatMessage[], budget: number): number {
+  let total = messages.reduce((n, m) => n + messageChars(m), 0);
+  let elided = 0;
+  const protectedFrom = Math.max(2, messages.length - 4);
+  for (let i = 2; i < protectedFrom && total > budget; i++) {
+    const m = messages[i]!;
+    if (m.role === "tool" && m.content !== ELIDED && m.content.length > ELIDED.length) {
+      total -= m.content.length - ELIDED.length;
+      m.content = ELIDED;
+      elided++;
+    } else if (m.role === "assistant" && m.tool_calls) {
+      for (const call of m.tool_calls) {
+        if (call.function.name !== "write" || call.function.arguments.length < 500) continue;
+        let path = OUTPUT_PATH;
+        try {
+          path = JSON.parse(call.function.arguments).path ?? path;
+        } catch {
+          // keep the default
+        }
+        const stub = JSON.stringify({ path, content: "[omitted to save context; the file is saved in the workspace]" });
+        total -= call.function.arguments.length - stub.length;
+        call.function.arguments = stub;
+        elided++;
+      }
+    }
+  }
+  return elided;
+}
+
+function newRunId(now: Date): string {
+  return `run-${now.getTime().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 export async function runHomepageBuild(opts: RunOptions): Promise<HomepageBuildResult> {
-  const { client, bridge, store, callbacks, signal } = opts;
+  const { llm, bridge, store, callbacks, signal } = opts;
   const emit: Emit = {
     phase: (p, d) => callbacks?.onPhase?.(p, d),
     text: (t) => callbacks?.onText?.(t),
     log: (l) => callbacks?.onLog?.(l),
   };
+  const maxSteps = opts.maxSteps ?? LOOP_DEFAULTS.maxSteps;
+  const maxToolResultChars = opts.maxToolResultChars ?? LOOP_DEFAULTS.maxToolResultChars;
+  const contextBudgetChars = opts.contextBudgetChars ?? LOOP_DEFAULTS.contextBudgetChars;
+  const now = opts.now ?? new Date();
 
   emit.phase("setup");
-  const [agentId, environmentId] = await Promise.all([
-    ensureAgent(client, store, opts.model),
-    ensureEnvironment(client, store),
-  ]);
-  emit.log(`agent=${agentId} environment=${environmentId}`);
 
-  let sessionId = opts.resumeSessionId;
-  if (!sessionId) {
-    emit.phase("session-create");
-    const session = await client.beta.sessions.create({
-      agent: agentId,
-      environment_id: environmentId,
-      title: `Homepage ${(opts.now ?? new Date()).toISOString().slice(0, 10)}`,
-    });
-    sessionId = session.id;
-    await store.set(STORAGE_KEYS.activeSessionId, sessionId);
+  let run: RunCheckpoint | undefined;
+  if (opts.resumeSessionId) {
+    const saved = await store.get<RunCheckpoint>(STORAGE_KEYS.runCheckpoint);
+    if (saved?.id === opts.resumeSessionId && Array.isArray(saved.messages)) {
+      run = saved;
+      emit.log(`resuming ${run.id} after ${run.steps} model turn(s)`);
+    } else {
+      emit.log(`no checkpoint for ${opts.resumeSessionId}; starting a fresh build`);
+    }
   }
-  emit.log(`session=${sessionId}`);
+  if (!run) {
+    emit.phase("session-create");
+    run = {
+      id: newRunId(now),
+      model: normalizeModelId(opts.model ?? DEFAULT_MODEL),
+      messages: [
+        { role: "system", content: HOMEPAGE_SYSTEM_PROMPT },
+        { role: "user", content: buildKickoffMessage({ now, userSystemPrompt: opts.userSystemPrompt }) },
+      ],
+      files: {},
+      steps: 0,
+      nudges: 0,
+      finalMessage: "",
+    };
+  }
+  const state = run;
+  const workspace = new Workspace(state.files);
+  emit.log(`run=${state.id} model=${state.model}`);
 
-  // Persist upload IDs so cleanup can still find them after a reattach.
-  const uploadedFileIds: string[] =
-    (await store.get<string[]>(STORAGE_KEYS.uploadedFileIds)) ?? [];
-  const rememberUpload = async (id: string) => {
-    uploadedFileIds.push(id);
-    await store.set(STORAGE_KEYS.uploadedFileIds, uploadedFileIds);
+  const checkpoint = async () => {
+    state.files = workspace.snapshot();
+    try {
+      await store.set(STORAGE_KEYS.runCheckpoint, state);
+    } catch (err) {
+      // Storage quota, most likely. The build goes on; only resume is lost.
+      emit.log(`checkpoint not saved: ${String(err)}`);
+    }
   };
 
-  let finalMessage = "";
+  await store.set(STORAGE_KEYS.activeSessionId, state.id);
+  await checkpoint();
 
-  /**
-   * Every path out of here must send a result. An `agent.custom_tool_use` that
-   * never receives one leaves the session idle forever — the single
-   * unrecoverable bug in this design.
-   */
-  // Results computed but not yet delivered, by tool-use id. A send that fails
-  // (the connection dropped mid-build) is retried on reconnect with the same
-  // result, instead of scraping the pages again.
-  const undelivered = new Map<string, { is_error?: true; text: string }>();
-
-  const runTool = async (event: CustomToolUse): Promise<{ is_error?: true; text: string }> => {
+  const runTool = async (call: ChatToolCall): Promise<string> => {
+    let input: Record<string, unknown>;
+    try {
+      input = call.function.arguments.trim() ? JSON.parse(call.function.arguments) : {};
+      if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("arguments must be a JSON object");
+    } catch (err) {
+      return `Error: could not parse the arguments for ${call.function.name} (${String(err)}). ` +
+        `If the output was cut off, write a shorter file or use append: true to write it in parts.`;
+    }
     try {
       const blockedSites = normalizeBlockList(
         (typeof opts.blockedSites === "function" ? await opts.blockedSites() : opts.blockedSites) ?? DEFAULT_BLOCKED_SITES,
       );
-      let result: GetHistoryResult | GetPageHtmlResult;
-      switch (event.name) {
+      switch (call.function.name) {
         case "getHistory":
-          result = await runGetHistory(event, bridge, emit, blockedSites);
-          break;
+          return fitJson(await runGetHistory(input, bridge, emit, blockedSites), maxToolResultChars);
         case "getPageHtml":
-          result = await runGetPageHtml(event, { client, bridge, sessionId: sessionId!, rememberUpload, emit, blockedSites });
-          break;
+          return truncate(JSON.stringify(await runGetPageHtml(input, { bridge, workspace, emit, blockedSites })), maxToolResultChars);
+        case "read":
+          emit.phase("analyzing", "read");
+          return workspace.read(input as { path: string }, maxToolResultChars);
+        case "grep":
+          emit.phase("analyzing", "grep");
+          return workspace.grep(input as { pattern: string }, maxToolResultChars);
+        case "glob":
+          emit.phase("analyzing", "glob");
+          return truncate(workspace.glob(input), maxToolResultChars);
+        case "write":
+          emit.phase("writing");
+          return workspace.write(input as { path: string; content: string });
         default:
-          throw new Error(`Unknown custom tool: ${event.name}`);
+          throw new Error(`Unknown tool: ${call.function.name}`);
       }
-      return { text: JSON.stringify(result) };
     } catch (err) {
-      emit.log(`tool ${event.name} failed: ${String(err)}`);
-      return { is_error: true, text: String(err) };
-    }
-  };
-
-  /** Throws only if the result could not be sent; it is kept for the next attempt. */
-  const dispatch = async (event: CustomToolUse): Promise<void> => {
-    let result = undelivered.get(event.id);
-    if (!result) {
-      result = await runTool(event);
-      undelivered.set(event.id, result);
-    }
-    await client.beta.sessions.events.send(sessionId!, {
-      events: [
-        {
-          type: "user.custom_tool_result",
-          custom_tool_use_id: event.id,
-          ...(result.is_error ? { is_error: true } : {}),
-          content: [{ type: "text", text: result.text }],
-        },
-      ],
-    });
-    undelivered.delete(event.id);
-  };
-
-  const observe = (event: SessionEvent) => {
-    switch (event.type) {
-      case "agent.message":
-        for (const block of event.content) {
-          if (block.type === "text") {
-            finalMessage += block.text;
-            emit.text(block.text);
-          }
-        }
-        break;
-      case "agent.thinking":
-        emit.phase("thinking");
-        break;
-      case "agent.tool_use":
-        emit.phase("analyzing", event.name);
-        emit.log(`sandbox:${event.name}`);
-        break;
-      case "session.error":
-        emit.log(`session.error: ${JSON.stringify(event)}`);
-        break;
+      if (signal?.aborted) throw err;
+      emit.log(`tool ${call.function.name} failed: ${String(err)}`);
+      return truncate(`Error: ${err instanceof Error ? err.message : String(err)}`, maxToolResultChars);
     }
   };
 
   try {
-    const seen = new Set<string>();
-    const answered = new Set<string>();
-    let kickedOff = false;
-    let finished = false;
-
-    // A stream can close before the session is done (most often during a long
-    // tool call, while no events flow). That isn't the end of the build:
-    // reconnect, replay what was missed, and keep going.
-    for (let attempt = 0; !finished; attempt++) {
+    while (true) {
       if (signal?.aborted) throw new Error("aborted");
-      if (attempt > MAX_STREAM_RECONNECTS) {
-        throw new Error(`Lost the session stream ${MAX_STREAM_RECONNECTS} times; giving up.`);
-      }
-      if (attempt > 0) {
-        emit.log(`stream closed before the session finished; reconnecting (${attempt})`);
-        await new Promise((r) => setTimeout(r, Math.min(1000 * attempt, 5000)));
-      }
-
-      // ---- Open the stream BEFORE anything else. It only delivers events emitted
-      // ---- after it opens; send first and the early transitions are gone.
-      const stream = await client.beta.sessions.events.stream(sessionId, undefined, { signal });
-
-      // ---- Then replay history. Covers the gap before the stream attached, and
-      // ---- is what makes a reattach (or a reconnect) lossless.
-      const history: SessionEvent[] = [];
-      for await (const event of client.beta.sessions.events.list(sessionId)) {
-        history.push(event);
-      }
-
-      for (const event of history) {
-        if (event.type === "user.custom_tool_result") answered.add(event.custom_tool_use_id);
-        if (event.type === "user.message") kickedOff = true;
-      }
-      for (const event of history) {
-        if (seen.has(event.id)) continue;
-        seen.add(event.id);
-        observe(event);
-      }
-
-      // Only an end after the kickoff counts; a fresh session may idle before it.
-      const kickoffAt = history.findIndex((e) => e.type === "user.message");
-      if (kickoffAt !== -1 && history.slice(kickoffAt).some(isTerminal)) {
-        finished = true;
+      if (state.steps >= maxSteps) {
+        emit.log(`stopped after ${maxSteps} model turns`);
         break;
       }
 
-      if (!kickedOff) {
-        await client.beta.sessions.events.send(sessionId, {
-          events: [
-            {
-              type: "user.message",
-              content: [
-                {
-                  type: "text",
-                  text: buildKickoffMessage({
-                    now: opts.now ?? new Date(),
-                    userSystemPrompt: opts.userSystemPrompt,
-                  }),
-                },
-              ],
-            },
-          ],
-        });
-        kickedOff = true;
+      const elided = compactMessages(state.messages, contextBudgetChars);
+      if (elided) emit.log(`context: elided ${elided} earlier tool result(s)`);
+
+      emit.phase("thinking");
+      const response = await llm.complete(
+        { model: state.model, messages: state.messages, tools: HOMEPAGE_TOOLS, maxTokens: opts.maxTokens },
+        signal,
+      );
+      state.steps++;
+
+      if (response.content) {
+        state.finalMessage += (state.finalMessage ? "\n" : "") + response.content;
+        emit.text(response.content);
+      }
+      state.messages.push({
+        role: "assistant",
+        content: response.content ?? null,
+        ...(response.toolCalls.length ? { tool_calls: response.toolCalls } : {}),
+      });
+
+      if (response.toolCalls.length) {
+        // Every call gets a result, in order — an unanswered call is a malformed conversation.
+        for (const call of response.toolCalls) {
+          const result = await runTool(call);
+          state.messages.push({ role: "tool", tool_call_id: call.id, content: result });
+        }
+        await checkpoint();
+        continue;
       }
 
-      try {
-        // Re-answer any tool call that was left hanging when the stream dropped.
-        // `answered` only holds calls whose result reached the session.
-        for (const event of history) {
-          if (event.type === "agent.custom_tool_use" && !answered.has(event.id)) {
-            emit.log(`re-answering orphaned tool call ${event.id}`);
-            await dispatch(event);
-            answered.add(event.id);
-          }
-        }
-
-        for await (const event of stream) {
-          if (signal?.aborted) throw new Error("aborted");
-
-          // Live-preview events carry no `id` and are never terminal. They only
-          // arrive if `event_deltas` was requested, but the stream union includes
-          // them either way — reading `.id` off one would throw.
-          if (event.type === "event_start" || event.type === "event_delta") continue;
-
-          if (!seen.has(event.id)) {
-            seen.add(event.id);
-            observe(event);
-            if (event.type === "agent.custom_tool_use" && !answered.has(event.id)) {
-              await dispatch(event);
-              answered.add(event.id);
-            }
-          }
-
-          // Terminal checks run for *every* event, including ones we've already
-          // seen. `continue`-ing on a duplicate above would skip the terminal
-          // event that arrived in the history fetch, and the loop would never end.
-          if (isTerminal(event)) {
-            if (event.type === "session.status_idle") emit.log(`idle: ${event.stop_reason.type}`);
-            finished = true;
-            break;
-          }
-        }
-      } catch (err) {
-        // A dropped connection is retried like a clean close; a cancel is not.
-        if (signal?.aborted) throw err;
-        emit.log(`stream error: ${String(err)}`);
-      }
+      if (findDeliverable(workspace)) break;
+      if (state.nudges >= LOOP_DEFAULTS.maxNudges) break;
+      state.nudges++;
+      emit.log(`no ${OUTPUT_PATH} yet (finish_reason=${response.finishReason ?? "?"}); reminding the model`);
+      state.messages.push({
+        role: "user",
+        content:
+          `You have not written ${OUTPUT_PATH} yet. Call the write tool now with the complete ` +
+          `PersonalizedHomepage component (use append: true to send it in parts if it is long).`,
+      });
+      await checkpoint();
     }
 
     emit.phase("writing");
-    const code = await collectDeliverable(client, sessionId, finalMessage, emit);
+    const code = collectDeliverable(workspace, state.finalMessage, emit);
     emit.phase("done");
-    return { code: code.code, sessionId, source: code.source };
+    return { code: code.code, sessionId: state.id, source: code.source };
   } finally {
-    // Privacy: the event log holds every domain, title and page body we sent,
-    // and uploads persist independently of the session. Delete both, always.
+    // Privacy: the checkpoint holds every domain, title and page body this
+    // build read. It exists only so a killed worker can resume; drop it now.
     emit.phase("cleanup");
-    await Promise.allSettled(uploadedFileIds.map((id) => client.beta.files.delete(id)));
-    await store.remove(STORAGE_KEYS.uploadedFileIds);
-    if (sessionId) {
-      await deleteSessionWhenSettled(client, sessionId).catch((err) =>
-        emit.log(`session ${sessionId} was not deleted: ${String(err)}`),
-      );
-    }
+    await store.remove(STORAGE_KEYS.runCheckpoint);
     await store.remove(STORAGE_KEYS.activeSessionId);
   }
 }
 
-/** The session is done with this turn: it ended, or went idle for any reason but a pending tool call. */
-function isTerminal(event: SessionEvent): boolean {
-  if (event.type === "session.status_terminated") return true;
-  return event.type === "session.status_idle" && event.stop_reason.type !== "requires_action";
+/** Shrink the digest by dropping the lowest-ranked sites until it fits — valid JSON, unlike a cut string. */
+function fitJson(digest: GetHistoryResult, max: number): string {
+  let text = JSON.stringify(digest);
+  const sites = [...digest.sites];
+  while (text.length > max && sites.length > 1) {
+    sites.pop();
+    text = JSON.stringify({ ...digest, sites });
+  }
+  return truncate(text, max);
 }
 
 // ---------------------------------------------------------------------------
-// tool implementations
+// browser tools
 // ---------------------------------------------------------------------------
 
 async function runGetHistory(
-  event: CustomToolUse,
+  input: Record<string, unknown>,
   bridge: BrowserBridge,
   emit: Emit,
   blockedSites: string[],
 ): Promise<GetHistoryResult> {
-  const input = event.input as { daysToAnalyze?: number; maxResults?: number };
-  const daysToAnalyze = input.daysToAnalyze ?? DEFAULTS.daysToAnalyze;
-  const maxResults = input.maxResults ?? DEFAULTS.maxResults;
+  const daysToAnalyze = clamp(input.daysToAnalyze, DEFAULTS.daysToAnalyze, 1, 90);
+  const maxResults = clamp(input.maxResults, DEFAULTS.maxResults, 1, 50);
 
   emit.phase("history", `${daysToAnalyze}d`);
   const { sites, totalSitesSeen } = await bridge.getHistory({ daysToAnalyze, maxResults });
@@ -329,23 +363,23 @@ async function runGetHistory(
   return digest;
 }
 
+function clamp(value: unknown, fallback: number, min: number, max: number): number {
+  const n = typeof value === "number" ? value : Number(value ?? NaN);
+  return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.floor(n))) : fallback;
+}
+
 async function runGetPageHtml(
-  event: CustomToolUse,
-  ctx: {
-    client: Anthropic;
-    bridge: BrowserBridge;
-    sessionId: string;
-    rememberUpload: (id: string) => Promise<void>;
-    emit: Emit;
-    blockedSites: string[];
-  },
+  input: Record<string, unknown>,
+  ctx: { bridge: BrowserBridge; workspace: Workspace; emit: Emit; blockedSites: string[] },
 ): Promise<GetPageHtmlResult> {
-  const input = event.input as { urls: string[]; loadDelayMs?: number };
-  ctx.emit.phase("scraping", `${input.urls.length} pages`);
+  const requested = Array.isArray(input.urls) ? input.urls.map(String) : [];
+  if (!requested.length) throw new Error("getPageHtml needs a non-empty `urls` array");
+  const urls = requested.slice(0, 8);
+  ctx.emit.phase("scraping", `${urls.length} pages`);
 
   const allowed: string[] = [];
   const blocked: GetPageHtmlResult["failed"] = [];
-  for (const url of input.urls) {
+  for (const url of urls) {
     // Match on the URL the browser will load; malformed URLs never reach the signed-in browser.
     if (isAllowedUrl(url, ctx.blockedSites)) allowed.push(url);
     else blocked.push({ url, reason: "blocked by the user's settings" });
@@ -355,12 +389,12 @@ async function runGetPageHtml(
   const { pages: loaded, failed } = allowed.length
     ? await ctx.bridge.getPageHtml({
         urls: allowed,
-        loadDelayMs: input.loadDelayMs ?? DEFAULTS.loadDelayMs,
+        loadDelayMs: clamp(input.loadDelayMs, DEFAULTS.loadDelayMs, 0, 30_000),
       })
     : { pages: [], failed: [] };
 
   // A redirect can land on a blocked host, and a public-looking name (fritz.box, an
-  // intranet name) can resolve to a private address; drop what it read before anything is uploaded.
+  // intranet name) can resolve to a private address; drop what it read before the model sees it.
   const pages = loaded.filter((page) => {
     const urlAllowed = !page.finalUrl || isAllowedUrl(page.finalUrl, ctx.blockedSites);
     if (urlAllowed && !(page.ip && isPrivateAddress(page.ip))) return true;
@@ -370,51 +404,31 @@ async function runGetPageHtml(
   if (blocked.length) ctx.emit.log(`blocked: ${blocked.length} url(s)`);
 
   const refs: PageRef[] = [];
-  const mountFailures = [...blocked, ...failed];
+  const saveFailures = [...blocked, ...failed];
+  const existing = ctx.workspace.list().length;
 
   for (const page of pages) {
     try {
-      const filename = `${slugifyUrl(page.url)}_${refs.length}.html`;
-      const upload = await ctx.client.beta.files.upload({
-        file: new File([page.html], filename, { type: "text/html" }),
-      });
-      await ctx.rememberUpload(upload.id);
-
-      // Mount mid-session, while the session idles awaiting this very result.
-      // The API re-roots every mount under /mnt/session/uploads (see below).
-      const resource = await ctx.client.beta.sessions.resources.add(ctx.sessionId, {
-        type: "file",
-        file_id: upload.id,
-        mount_path: `${UPLOAD_ROOT}/pages/${filename}`,
-      });
-
-      refs.push({
-        url: page.url,
-        title: page.title,
-        // The API re-roots every mount under /mnt/session/uploads. Report what it
-        // resolved, not what we asked for, or the model greps a path that isn't there.
-        mountPath: resource.mount_path,
-        bytes: page.html.length,
-      });
-      ctx.emit.log(`mounted ${page.url} -> ${resource.mount_path} (${page.html.length}b)`);
+      const filename = `${slugifyUrl(page.url)}_${existing + refs.length}.html`;
+      const saved = ctx.workspace.addPage(filename, page.html);
+      refs.push({ url: page.url, title: page.title, mountPath: saved.path, bytes: saved.bytes });
+      ctx.emit.log(`saved ${page.url} -> ${saved.path} (${saved.bytes} chars)`);
     } catch (err) {
-      mountFailures.push({ url: page.url, reason: `mount failed: ${String(err)}` });
+      saveFailures.push({ url: page.url, reason: `save failed: ${String(err)}` });
     }
   }
 
-  if (refs.length === 0 && mountFailures.length > 0 && blocked.length === 0) {
+  if (refs.length === 0 && saveFailures.length > 0 && blocked.length === 0) {
     throw new Error(
-      `No pages could be mounted. Failures: ${mountFailures
-        .map((f) => `${f.url} (${f.reason})`)
-        .join("; ")}`,
+      `No pages could be loaded. Failures: ${saveFailures.map((f) => `${f.url} (${f.reason})`).join("; ")}`,
     );
   }
 
-  return { pages: refs, failed: mountFailures };
+  return { pages: refs, failed: saveFailures };
 }
 
 // ---------------------------------------------------------------------------
-// deliverable retrieval
+// deliverable
 // ---------------------------------------------------------------------------
 
 const CODE_FENCE = /```(?:tsx|jsx|ts|js|typescript|javascript)?\s*\n([\s\S]*?)```/;
@@ -422,70 +436,41 @@ const CODE_FENCE = /```(?:tsx|jsx|ts|js|typescript|javascript)?\s*\n([\s\S]*?)``
 /** Strip a ```tsx fence, if the model wrapped the file contents in one. */
 function stripFence(text: string): string {
   const fenced = text.match(CODE_FENCE);
-  return (fenced ? fenced[1] : text).trim();
+  return (fenced ? fenced[1]! : text).trim();
 }
 
-async function collectDeliverable(
-  client: Anthropic,
-  sessionId: string,
+function findDeliverable(workspace: Workspace): { path: string; text: string } | undefined {
+  const primary = workspace.get(OUTPUT_PATH);
+  if (primary?.trim()) return { path: OUTPUT_PATH, text: primary };
+  for (const file of workspace.list()) {
+    if (!file.path.startsWith(`${OUTPUTS_DIR}/`) || !/\.(tsx|jsx|ts|js)$/.test(file.path)) continue;
+    const text = workspace.get(file.path);
+    if (text?.trim()) return { path: file.path, text };
+  }
+  return undefined;
+}
+
+function collectDeliverable(
+  workspace: Workspace,
   finalMessage: string,
   emit: Emit,
-): Promise<{ code: string; source: HomepageBuildResult["source"] }> {
-  // There is a short indexing lag between status_idle and outputs appearing.
-  for (let attempt = 0; attempt < 5; attempt++) {
-    try {
-      for await (const file of client.beta.files.list({
-        scope_id: sessionId,
-        betas: [MANAGED_AGENTS_BETA],
-      })) {
-        if (!/\.(tsx|jsx|ts|js)$/.test(file.filename)) continue;
-        const response = await client.beta.files.download(file.id);
-        const text = await response.text();
-        if (text.trim()) {
-          emit.log(`deliverable from session output: ${file.filename} (${text.length}b)`);
-          return { code: stripFence(text), source: "session-output" };
-        }
-      }
-    } catch (err) {
-      emit.log(`files.list attempt ${attempt + 1} failed: ${String(err)}`);
-    }
-    await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+): { code: string; source: HomepageBuildResult["source"] } {
+  const file = findDeliverable(workspace);
+  if (file) {
+    emit.log(`deliverable from workspace output: ${file.path} (${file.text.length} chars)`);
+    return { code: stripFence(file.text), source: "session-output" };
   }
 
   // Fallback: the model sometimes answers with the component inline instead of
   // (or as well as) writing it. Better than failing the run outright.
   const fenced = finalMessage.match(CODE_FENCE);
-  if (fenced && fenced[1].includes("PersonalizedHomepage")) {
+  if (fenced && fenced[1]!.includes("PersonalizedHomepage")) {
     emit.log("deliverable recovered from message fence");
-    return { code: fenced[1].trim(), source: "message-fence" };
+    return { code: fenced[1]!.trim(), source: "message-fence" };
   }
 
   throw new Error(
     `Agent produced no homepage. Expected a file at ${OUTPUT_PATH}. ` +
       `Final message: ${finalMessage.slice(0, 400)}`,
   );
-}
-
-/**
- * A running session can't be deleted ("cannot delete while running"). After a
- * normal finish that's only the brief lag between the stream's idle and the
- * queryable status. After a cancel or error the agent is still mid-turn, so it
- * gets interrupted and has to reach a safe boundary before it goes idle.
- */
-const SETTLE_POLLS_BEFORE_INTERRUPT = 10;
-const INTERRUPT_DEADLINE_MS = 60_000;
-
-async function deleteSessionWhenSettled(client: Anthropic, sessionId: string): Promise<void> {
-  const deadline = Date.now() + INTERRUPT_DEADLINE_MS;
-  let interrupted = false;
-  for (let attempt = 0; Date.now() < deadline; attempt++) {
-    const session = await client.beta.sessions.retrieve(sessionId);
-    if (session.status !== "running") break;
-    if (!interrupted && attempt >= SETTLE_POLLS_BEFORE_INTERRUPT) {
-      await client.beta.sessions.events.send(sessionId, { events: [{ type: "user.interrupt" }] });
-      interrupted = true;
-    }
-    await new Promise((r) => setTimeout(r, interrupted ? 1000 : 200));
-  }
-  await client.beta.sessions.delete(sessionId);
 }
