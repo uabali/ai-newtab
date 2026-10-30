@@ -126,6 +126,10 @@ importers:
         version: 5.9.3
 
   packages/agent-core:
+    dependencies:
+      sucrase:
+        specifier: ^3.35.1
+        version: 3.35.1
     devDependencies:
       typescript:
         specifier: ^5.8.3

@@ -12,7 +12,7 @@ import {
   type ChatMessage,
   type RunCheckpoint,
 } from "@homepage/agent-core";
-import { COMPONENT, MemoryStore, call, mockClient, toolResults } from "./mock-llm";
+import { COMPONENT, COMPONENT_UNLINKED, MemoryStore, call, mockClient, toolResults } from "./mock-llm";
 import { fixtureHistory } from "./node-bridge";
 
 const PAGE = `<html><body><h2><a href="https://news.ycombinator.com/item?id=1">Rust 2.0 released</a></h2><p>Big news</p><h2><a href="/item?id=2">Second story</a></h2></body></html>`;
@@ -101,7 +101,7 @@ test("supports writing the component in parts with append", async () => {
     { content: "done" },
   ]);
   const result = await runHomepageBuild({ llm, store: new MemoryStore(), bridge: bridge() });
-  expect(result.code).toBe(COMPONENT);
+  expect(result.code).toBe(COMPONENT_UNLINKED);
 });
 
 test("reminds a model that stops without writing, then accepts the write", async () => {
@@ -112,10 +112,10 @@ test("reminds a model that stops without writing, then accepts the write", async
     { content: "done" },
   ]);
   const result = await runHomepageBuild({ llm, store: new MemoryStore(), bridge: bridge(), callbacks: { onLog: (l) => logs.push(l) } });
-  expect(result.code).toBe(COMPONENT);
+  expect(result.code).toBe(COMPONENT_UNLINKED);
   const nudge = requests[1]!.body.messages.at(-1);
   expect(nudge.role).toBe("user");
-  expect(nudge.content).toContain("You have not written /outputs/homepage.tsx");
+  expect(nudge.content).toContain("You have not written the homepage yet");
   expect(logs.some((l) => l.includes("reminding the model"))).toBe(true);
 });
 
@@ -124,7 +124,7 @@ test("falls back to a fenced component in the final message", async () => {
   const { llm } = mockClient([{ content: fenced }, { content: fenced }, { content: fenced }]);
   const result = await runHomepageBuild({ llm, store: new MemoryStore(), bridge: bridge() });
   expect(result.source).toBe("message-fence");
-  expect(result.code).toBe(COMPONENT);
+  expect(result.code).toBe(COMPONENT_UNLINKED);
 });
 
 test("fails clearly when no homepage is produced", async () => {
@@ -143,7 +143,7 @@ test("answers malformed tool arguments with an error instead of crashing", async
     { content: "done" },
   ]);
   const result = await runHomepageBuild({ llm, store: new MemoryStore(), bridge: bridge() });
-  expect(result.code).toBe(COMPONENT);
+  expect(result.code).toBe(COMPONENT_UNLINKED);
   const results = toolResults(requests.at(-1)!);
   expect(results.bad).toMatch(/^Error: could not parse the arguments for write/);
   expect(results.outside).toMatch(/only allowed under \/outputs/);
@@ -204,7 +204,7 @@ test("retries rate limits and server errors, then succeeds", async () => {
     { content: "done" },
   ]);
   const result = await runHomepageBuild({ llm, store: new MemoryStore(), bridge: bridge() });
-  expect(result.code).toBe(COMPONENT);
+  expect(result.code).toBe(COMPONENT_UNLINKED);
   expect(requests).toHaveLength(5);
 });
 

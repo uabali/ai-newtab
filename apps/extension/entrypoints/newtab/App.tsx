@@ -1,13 +1,23 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { RefreshCwIcon, RotateCcwIcon, SettingsIcon, SparklesIcon, XIcon } from "lucide-react";
+import { RefreshCwIcon, RotateCcwIcon, SettingsIcon, SparklesIcon, TriangleAlertIcon, XIcon } from "lucide-react";
 import { DEFAULT_MODEL, DEFAULT_BLOCKED_SITES, type HomepageModel } from "@homepage/agent-core";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Toaster } from "@/components/ui/sonner";
 import { BUILD_STEPS } from "@/lib/protocol";
-import { KEYS, extensionStore, loadHomepage, loadSettings, saveSetting } from "@/lib/storage";
+import { decideOnRenderFailure } from "@/lib/render-fallback";
+import {
+  KEYS,
+  extensionStore,
+  loadHomepage,
+  loadLastGoodHomepage,
+  loadSettings,
+  markHomepageRendered,
+  saveSetting,
+  type Homepage,
+} from "@/lib/storage";
 import { toRenderable } from "@/lib/transpile";
 import { ApiKeySetup } from "./components/ApiKeySetup";
 import { BuildProgress } from "./components/BuildProgress";
@@ -32,8 +42,15 @@ function Screen() {
   const [model, setModel] = useState<HomepageModel>(DEFAULT_MODEL);
   const [baseUrl, setBaseUrl] = useState("");
   const [autoRebuild, setAutoRebuild] = useState(true);
+  /** The newest saved homepage. */
+  const [homepage, setHomepage] = useState<Homepage | null>(null);
+  /** The version on screen: the newest, or the last one that rendered when the newest failed. */
+  const [shown, setShown] = useState<Homepage | null>(null);
+  /** Why the newest homepage isn't on screen. */
+  const [renderFailure, setRenderFailure] = useState<string | null>(null);
+  const failedVersions = useRef(new Set<string>());
   /** Transpiled homepage, ready for Sandpack. */
-  const [renderedCode, setRenderedCode] = useState<string | null>(null);
+  const renderedCode = useMemo(() => (shown ? toRenderable(shown.code) : null), [shown]);
   /** A session left mid-flight, offered as "Resume interrupted build". */
   const [resumable, setResumable] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
@@ -42,7 +59,12 @@ function Screen() {
   /** The error the user dismissed, so a stale banner doesn't linger. */
   const [dismissedError, setDismissedError] = useState<string | null>(null);
 
-  const { state, build, cancel } = useHomepageBuild((code) => setRenderedCode(toRenderable(code)));
+  const showHomepage = useCallback((next: Homepage | null) => {
+    setHomepage(next);
+    setShown(next);
+    setRenderFailure(null);
+  }, []);
+  const { state, build, cancel, repair } = useHomepageBuild(showHomepage);
 
   // Once a build finishes, drop back to the homepage view.
   useEffect(() => {
@@ -66,7 +88,7 @@ function Screen() {
         setBaseUrl(settings.baseUrl);
         setAutoRebuild(settings.autoRebuild);
         setResumable(activeSession ?? null);
-        if (homepage?.code) setRenderedCode(toRenderable(homepage.code));
+        if (homepage?.code) showHomepage(homepage);
       } finally {
         setLoading(false);
       }
@@ -85,7 +107,7 @@ function Screen() {
       setBlockedSites(sites);
       setSystemPrompt(prompt);
       setShowSettings(false);
-      setRenderedCode(null);
+      showHomepage(null);
       toast.success("Settings saved, rebuilding");
       build();
     },
@@ -110,6 +132,32 @@ function Screen() {
     setAutoRebuild(next);
     await saveSetting("autoRebuild", next);
   }, []);
+
+  const onRendered = useCallback(() => {
+    if (shown) void markHomepageRendered(shown);
+  }, [shown]);
+
+  /** A version failed to render: fall back to the last working one, and ask for the one repair. */
+  const onRenderError = useCallback(
+    async (message: string) => {
+      if (!homepage || !shown || failedVersions.current.has(shown.timestamp)) return;
+      failedVersions.current.add(shown.timestamp);
+      console.warn("[newtab] homepage failed to render", message);
+      const decision = decideOnRenderFailure({
+        current: homepage,
+        failed: shown,
+        lastGood: await loadLastGoodHomepage(),
+        canRepair: Boolean(apiKey),
+      });
+      setShown(decision.show);
+      setRenderFailure(message);
+      if (decision.repair) {
+        repair(homepage.timestamp, message);
+        toast("Homepage failed to render", { description: "Asking the model to fix it (one attempt)." });
+      }
+    },
+    [homepage, shown, apiKey, repair],
+  );
 
   if (loading) return <div className="p-5 text-center text-sm text-muted-foreground">Loading…</div>;
   if (!apiKey) return <ApiKeySetup onSave={saveKey} />;
@@ -141,7 +189,45 @@ function Screen() {
     );
   }
 
-  if (!renderedCode) {
+  // The newest homepage failed to render and there is no working one to show.
+  if (!renderedCode && homepage && renderFailure) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-muted/40 p-6">
+        <Card className="w-full max-w-xl">
+          <CardHeader>
+            <div className="mb-2 flex size-10 items-center justify-center rounded-full bg-destructive/10 text-destructive">
+              <TriangleAlertIcon className="size-5" />
+            </div>
+            <CardTitle className="text-2xl">Your homepage failed to render</CardTitle>
+            <CardDescription className="leading-relaxed">
+              {state.running
+                ? "Asking the model to fix it. This page updates when it's done."
+                : homepage.repairAttempted
+                  ? "The one automatic repair didn't fix it. Rebuild to start over."
+                  : "Rebuild to start over."}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Alert variant="destructive">
+              <AlertTitle>Render error</AlertTitle>
+              <AlertDescription className="break-words">{renderFailure}</AlertDescription>
+            </Alert>
+          </CardContent>
+          <CardFooter className="flex flex-wrap gap-3">
+            <Button onClick={() => build()} disabled={state.running}>
+              <RefreshCwIcon /> Rebuild
+            </Button>
+            <Button variant="ghost" className="ml-auto" onClick={() => setShowSettings(true)}>
+              <SettingsIcon /> Settings
+            </Button>
+          </CardFooter>
+        </Card>
+        {settings}
+      </main>
+    );
+  }
+
+  if (!renderedCode || !shown) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-muted/40 p-6">
         <Card className="w-full max-w-xl">
@@ -221,7 +307,27 @@ function Screen() {
         </Alert>
       )}
 
-      <HomepagePreview code={renderedCode} />
+      {renderFailure && homepage && shown.timestamp !== homepage.timestamp && (
+        <Alert className="fixed bottom-5 left-5 z-[999] max-w-md bg-background shadow-md">
+          <TriangleAlertIcon />
+          <AlertTitle>Showing your last working homepage</AlertTitle>
+          <AlertDescription>
+            <span>
+              The newest one failed to render
+              {state.running ? "; asking the model to fix it." : homepage.repairAttempted ? " and couldn't be repaired." : "."}
+            </span>
+            <span className="line-clamp-2 font-mono text-xs">{renderFailure}</span>
+          </AlertDescription>
+        </Alert>
+      )}
+
+      <HomepagePreview
+        code={renderedCode}
+        version={shown.timestamp}
+        links={shown.links}
+        onRendered={onRendered}
+        onRenderError={onRenderError}
+      />
 
       {settings}
     </div>

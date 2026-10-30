@@ -71,8 +71,51 @@ export function SettingsModal({
   };
   const keyValid = keyDraft.trim().length >= 20;
 
+  // Esc, the X and an outside click close the dialog, but never silently drop typed
+  // text: model and base URL save on close (as they do on blur), and unsaved
+  // instructions, blocklist or key raise an inline "unsaved changes" bar instead.
+  const blockedChanged = normalizeBlockList(blockedDraft.split("\n")).join("\n") !== normalizeBlockList(blockedSites).join("\n");
+  const unsaved = [
+    draft !== initialPrompt && "instructions",
+    blockedChanged && "blocked sites",
+    keyDraft.trim() && "API key",
+  ].filter(Boolean) as string[];
+  const [confirming, setConfirming] = useState(false);
+
+  const save = async () => {
+    // Persist model and endpoint before the rebuild reads settings.
+    if (!(await commitBaseUrl())) {
+      setConfirming(false);
+      setTab("model");
+      return;
+    }
+    await commitModel();
+    if (keyValid) {
+      await onChangeApiKey(keyDraft.trim());
+      setKeyDraft("");
+    }
+    onSave(draft, normalizeBlockList(blockedDraft.split("\n")));
+  };
+
+  const requestClose = async () => {
+    if (confirming) {
+      setConfirming(false); // a second Esc means "keep editing"
+      return;
+    }
+    await commitModel();
+    if (!(await commitBaseUrl())) {
+      setTab("model");
+      return;
+    }
+    if (unsaved.length) {
+      setConfirming(true);
+      return;
+    }
+    onClose();
+  };
+
   return (
-    <Dialog open onOpenChange={(open) => !open && onClose()}>
+    <Dialog open onOpenChange={(open) => !open && void requestClose()}>
       <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle className="text-xl">Customize your homepage</DialogTitle>
@@ -189,24 +232,34 @@ export function SettingsModal({
           </TabsContent>
         </Tabs>
 
-        <DialogFooter>
-          <Button variant="outline" onClick={onClose}>
-            Cancel
-          </Button>
-          <Button
-            onClick={async () => {
-              // Persist model and endpoint before the rebuild reads settings.
-              if (!(await commitBaseUrl())) {
-                setTab("model");
-                return;
-              }
-              await commitModel();
-              onSave(draft, normalizeBlockList(blockedDraft.split("\n")));
-            }}
+        {confirming ? (
+          <div
+            role="alertdialog"
+            aria-labelledby="unsaved-title"
+            data-testid="unsaved-changes"
+            className="flex flex-wrap items-center gap-3 rounded-lg border border-amber-500/50 bg-amber-500/10 p-3 text-sm text-foreground"
           >
-            Save &amp; rebuild
-          </Button>
-        </DialogFooter>
+            <p id="unsaved-title" className="mr-auto">
+              <strong>Unsaved changes</strong> to your {unsaved.join(", ")}.
+            </p>
+            <Button size="sm" variant="ghost" autoFocus onClick={() => setConfirming(false)}>
+              Keep editing
+            </Button>
+            <Button size="sm" variant="outline" onClick={onClose}>
+              Discard
+            </Button>
+            <Button size="sm" onClick={() => void save()}>
+              Save &amp; rebuild
+            </Button>
+          </div>
+        ) : (
+          <DialogFooter>
+            <Button variant="outline" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button onClick={() => void save()}>Save &amp; rebuild</Button>
+          </DialogFooter>
+        )}
       </DialogContent>
     </Dialog>
   );

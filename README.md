@@ -72,8 +72,18 @@ you open.
 
 Click **⚙️ Settings** on the new tab.
 
+**The default look: The Morning Tab.** With no instructions about the look, every
+build comes out as the broadsheet in the screenshot above: cream paper, serif type, a
+big masthead, a lead story and columns, thin rules, and "Your day" / "The Almanac"
+boxes. The model doesn't write that page; it writes the edition's content as JSON
+(`/outputs/edition.json`), and a fixed template renders it, so even a small free
+model produces the same, consistent layout. Dates, issue number and story counts are
+computed by the template, not the model.
+
 **Instructions.** Anything you write here goes into every build and takes priority
-over the agent's own defaults. This box sets both the content and the look:
+over the agent's own defaults, including The Morning Tab. This box sets both the
+content and the look; ask for a different look and the model writes its own
+component instead:
 
 | You write | You get |
 | --- | --- |
@@ -136,8 +146,25 @@ morning, so it never loops.
 - **What it can see.** It ranks the sites in your history and opens up to 8 of
   them per build. It skips search engines, webmail, banking and logged-out
   marketing pages. Anything it can't open is reported, not hidden.
-- **Links are real.** Every link on the page comes from a page the agent actually
-  read. It's told never to invent a URL.
+- **Links are real.** The model may only link to full `http(s)` URLs it actually
+  saw: a page it opened, a link on one of those pages, or the front page of a site
+  in your history. After the build, every link is checked against that list, and
+  anything else (invented, relative, `javascript:` …) is unlinked; the text stays.
+- **Clicking a link** opens it in this tab; Ctrl/⌘-click or middle-click opens a
+  new background tab. The homepage runs in a sandboxed iframe, so clicks are handed
+  to the extension, which checks the URL again (full `http(s)`, on the homepage's
+  allowlist) and opens it with `chrome.tabs`.
+- **If a homepage fails to render**, the new tab keeps showing the last version that
+  worked, with a small notice, and the error goes back to the model for exactly one
+  repair attempt (only the component and the error are sent, no history or pages).
+  With no working version to fall back to, you get an error card with **Rebuild**,
+  never a blank page. A component that doesn't even compile gets its one repair
+  during the build, before it is saved.
+- **Esc in Settings never throws away what you typed.** Esc, the ✕ and clicking
+  outside close the dialog and save the model and base URL (as they already do when
+  you leave those fields). If the instructions, the blocked sites or a new API key
+  are unsaved, the dialog stays open and asks: **Keep editing**, **Discard**, or
+  **Save & rebuild**. Press Esc again to keep editing. **Cancel** still discards.
 - **Interrupted builds.** The conversation and scraped pages are checkpointed to
   local storage after every tool turn. If Chrome closes mid-build, the new tab
   offers **Resume interrupted build** and continues from the last checkpoint
@@ -153,8 +180,11 @@ morning, so it never loops.
    `/pages/*.html`.
 3. **`grep` / `glob` / `read`**: the agent pulls headlines, posts and links out of
    those files. These tools run in the extension, over memory only.
-4. **`write`**: it writes one React component to `/outputs/homepage.tsx`, which
-   the new tab renders.
+4. **`write`**: it writes the edition's content to `/outputs/edition.json`, which
+   the Morning Tab template turns into a React component, or, if your
+   instructions ask for a different look, its own component to
+   `/outputs/homepage.tsx`. The result is compile-checked and link-checked, then
+   the new tab renders it.
 
 The extension's background worker runs the agent loop itself
 (`packages/agent-core/orchestrator.ts`) and calls the model through the

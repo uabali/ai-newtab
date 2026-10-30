@@ -6,6 +6,7 @@
  * connect on AGENT_PORT, receive a snapshot, then stream deltas.
  */
 import type { RunPhase } from "@homepage/agent-core";
+import type { Homepage } from "./storage";
 
 export const AGENT_PORT = "homepage-agent";
 
@@ -38,6 +39,7 @@ export const LOG_RETENTION = 40;
 export type PageMsg =
   | { kind: "subscribe" } //                    → replies with a snapshot
   | { kind: "startBuild"; resume?: boolean } // no-op if one is already running
+  | { kind: "repair"; timestamp: string; error: string } // the homepage with this timestamp failed to render
   | { kind: "cancel" };
 
 // worker → page (broadcast to every connected tab)
@@ -46,7 +48,7 @@ export type BuildMsg =
   | { kind: "phase"; phase: RunPhase; stepIndex: number; detail: string }
   | { kind: "text"; chunk: string } // narration delta
   | { kind: "log"; line: string }
-  | { kind: "done"; code: string } // homepage saved; carries the raw TSX
+  | { kind: "done"; homepage: Homepage } // homepage saved
   | { kind: "error"; message: string };
 
 /**

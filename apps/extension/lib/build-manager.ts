@@ -1,4 +1,11 @@
-import { createChatClient, normalizeBaseUrl, runHomepageBuild, type RunPhase } from "@homepage/agent-core";
+import {
+  createChatClient,
+  normalizeBaseUrl,
+  runHomepageBuild,
+  runHomepageRepair,
+  type HomepageBuildResult,
+  type RunPhase,
+} from "@homepage/agent-core";
 import { shouldAutoRebuild } from "./auto-rebuild";
 import { browserBridge } from "./browser-bridge";
 import { setApiOrigin } from "./scraper";
@@ -10,7 +17,8 @@ import {
   type BuildState,
   type PageMsg,
 } from "./protocol";
-import { KEYS, extensionStore, loadHomepage, loadSettings, saveHomepage } from "./storage";
+import { shouldRepair } from "./render-fallback";
+import { KEYS, extensionStore, homepageFromResult, loadHomepage, loadSettings, saveHomepage } from "./storage";
 
 type Port = Parameters<Parameters<typeof browser.runtime.onConnect.addListener>[0]>[0];
 
@@ -59,6 +67,9 @@ export class BuildManager {
         break;
       case "startBuild":
         void this.startBuild({ resume: msg.resume });
+        break;
+      case "repair":
+        void this.startRepair(msg.timestamp, msg.error);
         break;
       case "cancel":
         this.cancel();
@@ -190,13 +201,7 @@ export class BuildManager {
         },
       });
 
-      // Persist the raw TSX; the page transpiles it for preview.
-      await saveHomepage(result.code);
-
-      this.state = { ...this.state, running: false, phase: "done" };
-      this.broadcast({ kind: "done", code: result.code });
-      await this.mirror(true);
-      console.log("[BuildManager] build done", { bytes: result.code.length, source: result.source });
+      await this.finish(result);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.state = { ...this.state, running: false, phase: "error", error: message };
@@ -204,6 +209,71 @@ export class BuildManager {
       await this.mirror(true);
       this.notifyFailure(message);
       console.error("[BuildManager] build failed", error);
+    } finally {
+      this.running = false;
+      this.controller = null;
+      this.stopKeepalive();
+    }
+  }
+
+  /** Persist a finished build or repair and tell every tab. The page transpiles the raw TSX for preview. */
+  private async finish(result: HomepageBuildResult) {
+    const homepage = homepageFromResult(result);
+    await saveHomepage(homepage);
+    this.state = { ...this.state, running: false, phase: "done" };
+    this.broadcast({ kind: "done", homepage });
+    await this.mirror(true);
+    console.log("[BuildManager] build done", {
+      bytes: result.code.length,
+      source: result.source,
+      links: result.links.length,
+      removedLinks: result.removedLinks.length,
+      repaired: result.repaired,
+    });
+  }
+
+  /**
+   * The one repair attempt for a homepage that failed to render in a tab. Only the
+   * component and the error go to the model (no history, no pages). The homepage is
+   * marked first, so it is never repaired twice, even if the worker dies mid-way.
+   * On failure the tab keeps showing the last working homepage.
+   */
+  async startRepair(timestamp: string, error: string) {
+    if (this.running) return;
+    this.running = true;
+    this.controller = new AbortController();
+    try {
+      const [saved, { apiKey, model, baseUrl }] = await Promise.all([loadHomepage(), loadSettings()]);
+      if (!shouldRepair(saved, { timestamp }) || !apiKey) return;
+      await saveHomepage({ ...saved, repairAttempted: true });
+
+      this.state = { ...INITIAL_BUILD_STATE, running: true, phase: "setup", detail: "repair" };
+      this.broadcast({ kind: "snapshot", state: this.state });
+      this.startKeepalive();
+      console.log("[BuildManager] repair started", { error: error.slice(0, 200) });
+
+      const endpoint = normalizeBaseUrl(baseUrl);
+      setApiOrigin(endpoint);
+      const result = await runHomepageRepair({
+        llm: createChatClient({ apiKey, baseUrl: endpoint }),
+        model,
+        code: saved.code,
+        error: error.slice(0, 1000),
+        allowedLinks: saved.links,
+        signal: this.controller.signal,
+        callbacks: {
+          onPhase: (phase, detail) => this.onPhase(phase, detail),
+          onText: (chunk) => this.onText(chunk),
+          onLog: (line) => this.onLog(line),
+        },
+      });
+      await this.finish(result);
+    } catch (err) {
+      const message = `Repair failed: ${err instanceof Error ? err.message : String(err)}`;
+      this.state = { ...this.state, running: false, phase: "error", error: message };
+      this.broadcast({ kind: "error", message });
+      await this.mirror(true);
+      console.error("[BuildManager] repair failed", err);
     } finally {
       this.running = false;
       this.controller = null;

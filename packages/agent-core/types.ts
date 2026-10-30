@@ -110,6 +110,15 @@ export interface HomepageBuildResult {
   code: string;
   /** The local build id (kept under this name so hosts written for the hosted version still work). */
   sessionId: string;
-  /** Where the code came from: the written output file, or a fenced block in the final message. */
-  source: "session-output" | "message-fence";
+  /**
+   * Where the code came from: the written component, the Morning Tab template
+   * filled from edition.json, a fenced block in the final message, or a repair.
+   */
+  source: "session-output" | "edition" | "message-fence" | "repair";
+  /** Link keys left in the code after the link check: the click allowlist. */
+  links: string[];
+  /** Links the check removed, with why. */
+  removedLinks: Array<{ url: string; reason: "not-http" | "not-seen" }>;
+  /** Whether the one repair attempt was used. */
+  repaired: boolean;
 }
