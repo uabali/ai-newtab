@@ -79,6 +79,11 @@ The finished component renders inside a Sandpack iframe
 (`entrypoints/newtab/components/HomepagePreview.tsx`): it is model-written code, so
 it runs sandboxed, not in the extension's own page.
 
+The extension's own UI (key screen, Settings, toolbar, build progress) uses Tailwind
+v4 and shadcn/ui components on Radix primitives (`components/ui/`). Those styles
+apply only to the new-tab document; the homepage renders in Sandpack's cross-origin
+iframe, a separate document, so Tailwind's reset and utilities never reach it.
+
 ## Layout
 
 ```
@@ -97,6 +102,7 @@ apps/extension/           MV3 extension (WXT + React)
     background.ts         service worker: hosts BuildManager, alarm heartbeat
     scraper.content.ts    injected into scraped tabs: scroll, return HTML
     newtab/               the new-tab UI (thin client onto the worker)
+  components/ui/          shadcn/ui components (Radix + Tailwind) used by the new-tab UI
   lib/
     build-manager.ts      single-flight build host, broadcast, keepalive, reattach
     browser-bridge.ts     BrowserBridge over chrome.history / chrome.tabs
@@ -106,8 +112,11 @@ apps/extension/           MV3 extension (WXT + React)
     auto-rebuild.ts       when to rebuild on a schedule
     storage.ts            every chrome.storage key, settings, saved homepage
     transpile.ts          TSX → JS for the preview
+    model-catalog.ts      model picker: presets + OpenRouter's public tool-calling list
+    utils.ts              cn() class-name helper for the UI components
 
-harness/                  Bun scripts: mock-fetch tests of the loop, a real-API runner, extension test
+harness/                  Bun scripts: mock-fetch tests of the loop, a real-API runner, extension test,
+                          screenshots (headless Chrome, dummy key, no model calls)
 ```
 
 ## Verification
@@ -139,7 +148,10 @@ Chrome reports no address, the name check is all there is. History digests still
 such a domain. Subresource loads are not intercepted.
 
 Data leaves the browser only in requests to the configured endpoint (OpenRouter by
-default). Nothing is stored server-side by the extension, but OpenRouter and the
+default). The one other request is the model picker's anonymous `GET
+https://openrouter.ai/api/v1/models?supported_parameters=tools`
+(`lib/model-catalog.ts`): sent only when the endpoint is OpenRouter and the picker is
+opened, with no key, cookies, referrer or user data; on failure the presets are shown. Nothing is stored server-side by the extension, but OpenRouter and the
 upstream model provider each have their own logging/retention policies (free
 endpoints in particular may log prompts). Check them before pointing this at private
 pages. Locally, a checkpoint with the scraped pages sits in `chrome.storage.local`

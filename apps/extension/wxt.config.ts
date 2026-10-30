@@ -1,8 +1,11 @@
+import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "wxt";
 
 // See https://wxt.dev/api/config.html
 export default defineConfig({
   modules: ["@wxt-dev/module-react"],
+  // Tailwind for the extension UI only; the generated homepage renders in Sandpack's iframe.
+  vite: () => ({ plugins: [tailwindcss()] }),
   manifest: {
     name: "AI Homepage",
     description: "A new-tab page an agent rebuilds daily from what you've actually been browsing.",

@@ -4,17 +4,23 @@
  * provision — just a model id and an OpenAI-compatible endpoint.
  */
 /**
- * Suggestions shown in Settings. The model field is free text: any OpenRouter
- * model id that supports tool calling works. Every id below was listed with
- * `tools` in its supported parameters on openrouter.ai/api/v1/models
- * (checked 2026-10-30). The first is the default.
+ * Presets shown in the Settings model picker. The model field is free text: any
+ * OpenRouter model id that supports tool calling works. Every id below was listed
+ * with `tools` in its supported parameters on openrouter.ai/api/v1/models
+ * (checked 2026-10-30). The first is the default. A model the user already saved
+ * is kept as-is, even if it is not (or no longer) in this list.
  */
 export const MODEL_SUGGESTIONS = [
-  { id: "deepseek/deepseek-v4-flash", label: "DeepSeek V4 Flash — default: cheap, 1M context" },
-  { id: "google/gemini-3.5-flash", label: "Gemini 3.5 Flash — fast, strong at layout" },
-  { id: "anthropic/claude-sonnet-5.5", label: "Claude Sonnet 5.5 — best editor, priciest" },
-  { id: "google/gemma-4-31b-it:free", label: "Gemma 4 31B (free, rate-limited)" },
-  { id: "nvidia/nemotron-3-ultra-550b-a55b:free", label: "Nemotron 3 Ultra (free, rate-limited)" },
+  { id: "nvidia/nemotron-3-ultra-550b-a55b:free", label: "NVIDIA Nemotron 3 Ultra — free, rate-limited" },
+  { id: "deepseek/deepseek-v4.1-flash", label: "DeepSeek V4.1 Flash — cheap, 1M context" },
+  { id: "anthropic/claude-haiku-5.5", label: "Claude Haiku 5.5" },
+  { id: "z-ai/glm-5.3-flash", label: "GLM 5.3 Flash" },
+  { id: "qwen/qwen3.8-flash", label: "Qwen3.8 Flash" },
+  { id: "deepseek/deepseek-v4-pro-0813", label: "DeepSeek V4 Pro 0813" },
+  { id: "google/gemini-3.8-flash", label: "Gemini 3.8 Flash" },
+  { id: "openai/gpt-6.1-terra", label: "GPT-6.1 Terra" },
+  { id: "anthropic/claude-sonnet-5.5", label: "Claude Sonnet 5.5" },
+  { id: "google/gemini-4-argon", label: "Gemini 4 Argon" },
 ] as const;
 
 export type HomepageModel = string;

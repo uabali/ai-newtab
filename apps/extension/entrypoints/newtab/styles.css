@@ -1,4 +1,37 @@
+/*
+ * Tailwind + shadcn/ui theme for the extension's own UI (key screen, settings,
+ * build progress, toolbar). The model-generated homepage is NOT styled by this:
+ * it renders inside Sandpack's cross-origin iframe, which has its own document,
+ * so none of these rules (including Tailwind's preflight) can reach it. Sandpack's
+ * own wrapper styles are unlayered, so they also win over the layered preflight.
+ */
+@import "tailwindcss" source(none);
+@import "tw-animate-css";
+
+@source "./";
+@source "../../components";
+
 :root {
+  --radius: 0.625rem;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -6,8 +39,40 @@
   -webkit-text-size-adjust: 100%;
 }
 
-body {
-  margin: 0;
+@theme inline {
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply m-0 bg-background font-sans text-foreground;
+  }
 }
 
 @keyframes hb-pulse {
@@ -20,246 +85,12 @@ body {
   }
 }
 
-/* ---- Assembly-line build screen (Progress component) ---- */
-.build {
-  --b-ink: #171b23;
-  --b-muted: #5c6472;
-  --b-faint: #8a92a1;
-  --b-border: #e2e6ee;
-  --b-surface: #ffffff;
-  --b-panel: #f6f8fb;
-  --b-accent: #0066cc;
-  --b-accent-wash: #e8f1fc;
-  --b-success: #1f9d6b;
-
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  height: 100vh;
-  width: 100vw;
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  color: var(--b-ink);
-  background: var(--b-surface);
-  -webkit-font-smoothing: antialiased;
-}
-
-.build-left,
-.build-right {
-  display: flex;
-  padding: clamp(28px, 6vh, 64px) clamp(24px, 4vw, 56px);
-  min-height: 0;
-}
-.build-left {
-  justify-content: flex-end;
-}
-.build-right {
-  justify-content: flex-start;
-  background: var(--b-panel);
-  border-left: 1px solid var(--b-border);
-}
-.build-panel {
-  width: 100%;
-  max-width: 460px;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-}
-
-.build-top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 34px;
-}
-.build-title {
-  font-size: 20px;
-  font-weight: 650;
-  letter-spacing: -0.01em;
-}
-.build-elapsed {
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
-  font-size: 12px;
-  color: var(--b-muted);
-  background: var(--b-panel);
-  border: 1px solid var(--b-border);
-  padding: 4px 11px;
-  border-radius: 20px;
-  font-variant-numeric: tabular-nums;
-}
-.build-right .build-elapsed {
-  background: var(--b-surface);
-}
-
-.build-steps {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-}
-.build-step {
-  display: grid;
-  grid-template-columns: 28px 1fr;
-  gap: 14px;
-  position: relative;
-  padding-bottom: 26px;
-}
-.build-step:last-child {
-  padding-bottom: 0;
-}
-/* connective rail between markers */
-.build-step::before {
-  content: "";
-  position: absolute;
-  left: 13px;
-  top: 28px;
-  bottom: 0;
-  width: 2px;
-  background: var(--b-border);
-}
-.build-step:last-child::before {
-  display: none;
-}
-.build-step.done::before {
-  background: rgba(31, 157, 107, 0.4);
-}
-
-.build-marker {
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  display: grid;
-  place-items: center;
-  font-size: 12px;
-  font-weight: 700;
-  border: 2px solid var(--b-border);
-  background: var(--b-surface);
-  color: var(--b-faint);
-  z-index: 1;
-  transition: border-color 0.3s, background 0.3s, color 0.3s;
-}
-.build-step.active .build-marker {
-  border-color: var(--b-accent);
-  color: var(--b-accent);
-  background: var(--b-accent-wash);
-  animation: build-pulse 1.8s ease-in-out infinite;
-}
-.build-step.done .build-marker {
-  border-color: var(--b-success);
-  background: var(--b-success);
-  color: #fff;
-}
-
-.build-step-label {
-  font-size: 15px;
-  font-weight: 550;
-  color: var(--b-faint);
-  padding-top: 3px;
-  transition: color 0.3s;
-}
-.build-step.active .build-step-label,
-.build-step.done .build-step-label {
-  color: var(--b-ink);
-}
-.build-step.active .build-step-label {
-  font-weight: 650;
-}
-.build-step-detail {
-  font-size: 12.5px;
-  color: var(--b-faint);
-  margin-top: 3px;
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
-}
-
-.build-cancel {
-  margin-top: 36px;
-  align-self: flex-start;
-  font: inherit;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  background: transparent;
-  border: 1px solid var(--b-border);
-  color: var(--b-muted);
-  padding: 9px 16px;
-  border-radius: 9px;
-  transition: border-color 0.15s, color 0.15s;
-}
-.build-cancel:hover {
-  border-color: #d8543f;
-  color: #d8543f;
-}
-.build-cancel:focus-visible {
-  outline: 2px solid var(--b-accent);
-  outline-offset: 2px;
-}
-
-.build-eyebrow {
-  font-size: 11px;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--b-faint);
-  font-weight: 600;
-  margin-bottom: 10px;
-}
-.build-log-label {
-  margin-top: 22px;
-}
-.build-narration {
-  background: var(--b-surface);
-  border: 1px solid var(--b-border);
-  border-radius: 12px;
-  padding: 18px 20px;
-  font-size: 15px;
-  line-height: 1.65;
-  color: var(--b-ink);
-  white-space: pre-wrap;
-  overflow-y: auto;
-  max-height: 42vh;
-  flex: 0 1 auto;
-}
-.build-log {
-  margin: 0;
-  background: #0f131b;
-  color: #8fd4a0;
-  border-radius: 12px;
-  padding: 14px 16px;
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
-  font-size: 12px;
-  line-height: 1.7;
-  overflow: auto;
-  flex: 1;
-  min-height: 90px;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-@keyframes build-pulse {
+@keyframes hb-ring {
   0%,
   100% {
-    box-shadow: 0 0 0 0 rgba(0, 102, 204, 0.28);
+    box-shadow: 0 0 0 0 color-mix(in oklch, var(--primary) 28%, transparent);
   }
   50% {
-    box-shadow: 0 0 0 6px rgba(0, 102, 204, 0);
-  }
-}
-
-@media (max-width: 760px) {
-  .build {
-    grid-template-columns: 1fr;
-    height: auto;
-    min-height: 100vh;
-  }
-  .build-right {
-    border-left: none;
-    border-top: 1px solid var(--b-border);
-  }
-  .build-left,
-  .build-right {
-    justify-content: center;
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .build-step.active .build-marker {
-    animation: none;
+    box-shadow: 0 0 0 6px transparent;
   }
 }

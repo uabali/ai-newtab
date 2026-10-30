@@ -92,15 +92,25 @@ history summaries and URLs requested through `getPageHtml`. A page that redirect
 onto a blocked host is dropped before its content is uploaded. Local-network
 addresses (localhost, private IPs, `.local` and `.internal` hosts) are always blocked.
 
-**Model.** Type any OpenRouter model id (the field suggests a few). The model
+**Model.** Type any OpenRouter model id, or click **Presets** to pick one. The model
 must support **tool calling**; check the "Tools" filter on
 [openrouter.ai/models](https://openrouter.ai/models?supported_parameters=tools).
+A model you already saved is kept as-is, even if it isn't a preset.
 
-- **`deepseek/deepseek-v4-flash`** (default): cheap, 1M context, solid tool use.
-- `google/gemini-3.5-flash`, `anthropic/claude-sonnet-5.5`: pricier, stronger editors.
-- **Free:** `google/gemma-4-31b-it:free` or `nvidia/nemotron-3-ultra-550b-a55b:free`.
-  Free models are heavily rate-limited and may be slower or fail mid-build;
-  OpenRouter may also log prompts for free endpoints.
+- **`nvidia/nemotron-3-ultra-550b-a55b:free`** (default, shown first).
+- `deepseek/deepseek-v4.1-flash`, `anthropic/claude-haiku-5.5`, `z-ai/glm-5.3-flash`,
+  `qwen/qwen3.8-flash`, `deepseek/deepseek-v4-pro-0813`, `google/gemini-3.8-flash`,
+  `openai/gpt-6.1-terra`, `anthropic/claude-sonnet-5.5`, `google/gemini-4-argon`.
+
+> **Free models (`:free`, including the default) are rate-limited** and may be slower
+> or fail mid-build, and **OpenRouter or the provider may log your prompts** for free
+> endpoints, which here include history summaries and page text. For anything you'd
+> rather not have logged, pick a paid model and check its provider's data policy.
+
+When the endpoint is OpenRouter, opening **Presets** also lists the other tool-calling
+models from OpenRouter's public model list (`GET /api/v1/models`). That request is
+anonymous: no API key, no cookies, no referrer, no history; it is sent only when you
+open the picker. If it fails, or you set a custom base URL, only the presets are shown.
 
 The new model takes effect from your next build.
 
@@ -168,6 +178,7 @@ pnpm dev                 # WXT with hot reload
 pnpm typecheck           # all packages
 pnpm test                # unit tests incl. the agent loop against a mock fetch (no API calls; needs Bun, or `npx -y bun test harness/`)
 pnpm extension:test      # loads the built extension into headless Chrome (no API calls)
+pnpm extension:screenshots # UI screenshots in headless Chrome with a dummy key → harness/out/shots/
 
 cp .env.example .env     # add OPENROUTER_API_KEY, then:
 pnpm agent:run           # a full build against the real API (spends credits), with fixture history

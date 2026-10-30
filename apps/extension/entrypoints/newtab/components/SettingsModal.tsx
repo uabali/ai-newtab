@@ -1,14 +1,16 @@
 import { useState } from "react";
-import {
-  DEFAULT_BASE_URL,
-  DEFAULT_MODEL,
-  MODEL_SUGGESTIONS,
-  normalizeBaseUrl,
-  normalizeBlockList,
-  normalizeModelId,
-  type HomepageModel,
-} from "@homepage/agent-core";
-import { btn } from "./ui";
+import { toast } from "sonner";
+import { DEFAULT_BASE_URL, normalizeBaseUrl, normalizeBlockList, normalizeModelId, type HomepageModel } from "@homepage/agent-core";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
+import { ModelCombobox } from "./ModelCombobox";
+
+const help = "text-xs text-muted-foreground leading-relaxed";
 
 export function SettingsModal({
   initialPrompt,
@@ -41,9 +43,10 @@ export function SettingsModal({
   const [baseUrlDraft, setBaseUrlDraft] = useState(baseUrl);
   const [baseUrlError, setBaseUrlError] = useState<string | null>(null);
   const [keyDraft, setKeyDraft] = useState("");
+  const [tab, setTab] = useState("content");
 
-  const commitModel = async () => {
-    const next = normalizeModelId(modelDraft);
+  const commitModel = async (raw: string = modelDraft) => {
+    const next = normalizeModelId(raw);
     setModelDraft(next);
     if (next !== model) await onChangeModel(next);
   };
@@ -66,158 +69,145 @@ export function SettingsModal({
       return false;
     }
   };
-  const field = { padding: "6px 8px", fontSize: 14, borderRadius: 4, border: "1px solid #ddd", flex: 1, minWidth: 0 } as const;
+  const keyValid = keyDraft.trim().length >= 20;
 
   return (
-    <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        backgroundColor: "rgba(0,0,0,0.5)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        zIndex: 1000,
-      }}
-      onClick={(e) => e.target === e.currentTarget && onClose()}
-    >
-      <div style={{ backgroundColor: "white", borderRadius: 8, padding: 24, width: "90%", maxWidth: 600, maxHeight: "90vh", overflowY: "auto" }}>
-        <h2 style={{ marginTop: 0, color: "#333" }}>Customize your homepage</h2>
-        <p style={{ color: "#666" }}>Standing instructions applied to every build.</p>
-        <textarea
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          placeholder="e.g. 'Focus on tech news and Rust releases', 'Always surface unread GitHub PRs first'"
-          style={{
-            width: "100%",
-            minHeight: 200,
-            padding: 12,
-            fontSize: 14,
-            borderRadius: 4,
-            border: "1px solid #ddd",
-            fontFamily: "inherit",
-          }}
-        />
-        <label style={{ display: "block", marginTop: 16, color: "#333", fontSize: 14 }}>
-          Sites the agent never reads
-          <textarea
-            value={blockedDraft}
-            onChange={(e) => setBlockedDraft(e.target.value)}
-            aria-describedby="blocked-sites-help"
-            style={{ width: "100%", boxSizing: "border-box", minHeight: 120, marginTop: 8, padding: 12, fontSize: 14, borderRadius: 4, border: "1px solid #ddd", fontFamily: "inherit" }}
-          />
-        </label>
-        <p id="blocked-sites-help" style={{ color: "#888", fontSize: 12, margin: "6px 0 0" }}>
-          One per line. Subdomains are included. Use *.example.com for wildcards.
-        </p>
-        <label
-          style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 16, color: "#333", fontSize: 14 }}
-        >
-          Model
-          <input
-            list="model-suggestions"
-            value={modelDraft}
-            onChange={(e) => setModelDraft(e.target.value)}
-            onBlur={() => void commitModel()}
-            placeholder={DEFAULT_MODEL}
-            spellCheck={false}
-            style={{ ...field, fontFamily: "ui-monospace, monospace" }}
-          />
-          <datalist id="model-suggestions">
-            {MODEL_SUGGESTIONS.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.label}
-              </option>
-            ))}
-          </datalist>
-        </label>
-        <p style={{ color: "#888", fontSize: 12, margin: "6px 0 0" }}>
-          Any OpenRouter model id that supports tool calling. Suggestions:{" "}
-          {MODEL_SUGGESTIONS.map((m) => m.id).join(", ")}. Models ending in <code>:free</code> cost
-          nothing but are rate-limited. Takes effect from the next build.
-        </p>
-        <label
-          style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 16, color: "#333", fontSize: 14 }}
-        >
-          Base URL
-          <input
-            value={baseUrlDraft}
-            onChange={(e) => setBaseUrlDraft(e.target.value)}
-            onBlur={() => void commitBaseUrl()}
-            placeholder={DEFAULT_BASE_URL}
-            spellCheck={false}
-            style={{ ...field, fontFamily: "ui-monospace, monospace" }}
-          />
-        </label>
-        <p style={{ color: baseUrlError ? "#a02620" : "#888", fontSize: 12, margin: "6px 0 0" }}>
-          {baseUrlError ??
-            "Optional. Leave empty for OpenRouter. Any https OpenAI-compatible endpoint works; your history and pages are sent only there."}
-        </p>
-        <label
-          style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 16, color: "#333", fontSize: 14 }}
-        >
-          API key
-          <input
-            type="password"
-            value={keyDraft}
-            onChange={(e) => setKeyDraft(e.target.value)}
-            placeholder="Paste a new key to replace the saved one"
-            autoComplete="off"
-            style={{ ...field, fontFamily: "ui-monospace, monospace" }}
-          />
-          <button
-            style={{ ...btn, padding: "6px 12px", opacity: keyDraft.trim().length >= 20 ? 1 : 0.5 }}
-            disabled={keyDraft.trim().length < 20}
-            onClick={() => {
-              void onChangeApiKey(keyDraft.trim());
-              setKeyDraft("");
-            }}
-          >
-            Replace
-          </button>
-        </label>
-        <label
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            marginTop: 16,
-            color: "#333",
-            fontSize: 14,
-            cursor: "pointer",
-          }}
-        >
-          <input
-            type="checkbox"
-            checked={autoRebuild}
-            onChange={(e) => onToggleAutoRebuild(e.target.checked)}
-          />
-          Rebuild automatically each morning
-        </label>
-        <p style={{ color: "#888", fontSize: 12, margin: "6px 0 0" }}>
-          When on, the extension builds one morning edition a day in the background (first time
-          Chrome is open between 5am and noon), so your next tab shows a fresh one (uses your OpenRouter key; pick a :free model to keep it at no cost).
-        </p>
-        <div style={{ display: "flex", gap: 12, marginTop: 20, justifyContent: "flex-end" }}>
-          <button
-            onClick={onClose}
-            style={{ ...btn, backgroundColor: "white", color: "#333", border: "1px solid #ddd" }}
-          >
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle className="text-xl">Customize your homepage</DialogTitle>
+          <DialogDescription>Standing instructions, privacy, model and schedule. Applied to every build.</DialogDescription>
+        </DialogHeader>
+
+        <Tabs value={tab} onValueChange={setTab}>
+          <TabsList className="w-full">
+            <TabsTrigger value="content">Content</TabsTrigger>
+            <TabsTrigger value="privacy">Privacy</TabsTrigger>
+            <TabsTrigger value="model">Model &amp; key</TabsTrigger>
+            <TabsTrigger value="schedule">Schedule</TabsTrigger>
+          </TabsList>
+
+          {/* forceMount keeps every field in the DOM, so nothing is lost or skipped when switching tabs. */}
+          <TabsContent value="content" forceMount className="data-[state=inactive]:hidden grid gap-2 pt-2">
+            <Label htmlFor="instructions">Instructions</Label>
+            <Textarea
+              id="instructions"
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              placeholder="e.g. 'Focus on tech news and Rust releases', 'Always surface unread GitHub PRs first'"
+              className="min-h-52"
+            />
+            <p className={help}>Takes priority over the agent&apos;s defaults, for both content and look.</p>
+          </TabsContent>
+
+          <TabsContent value="privacy" forceMount className="data-[state=inactive]:hidden grid gap-2 pt-2">
+            <Label htmlFor="blocked-sites">Sites the agent never reads</Label>
+            <Textarea
+              id="blocked-sites"
+              value={blockedDraft}
+              onChange={(e) => setBlockedDraft(e.target.value)}
+              aria-describedby="blocked-sites-help"
+              className="min-h-52 font-mono text-xs"
+            />
+            <p id="blocked-sites-help" className={help}>
+              One per line. Subdomains are included. Use *.example.com for wildcards. Local-network addresses are always
+              blocked.
+            </p>
+          </TabsContent>
+
+          <TabsContent value="model" forceMount className="data-[state=inactive]:hidden grid gap-5 pt-2">
+            <div className="grid gap-2">
+              <Label htmlFor="model">Model</Label>
+              <ModelCombobox
+                id="model"
+                value={modelDraft}
+                onChange={setModelDraft}
+                onCommit={(next) => void commitModel(next)}
+                baseUrl={baseUrlDraft}
+              />
+              <p className={help}>
+                Any OpenRouter model id that supports tool calling. Type one or pick from the list. Models ending in{" "}
+                <code>:free</code> cost nothing but are rate-limited. Takes effect from the next build.
+              </p>
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="base-url">Base URL</Label>
+              <Input
+                id="base-url"
+                value={baseUrlDraft}
+                onChange={(e) => setBaseUrlDraft(e.target.value)}
+                onBlur={() => void commitBaseUrl()}
+                placeholder={DEFAULT_BASE_URL}
+                spellCheck={false}
+                aria-invalid={baseUrlError ? true : undefined}
+                className="font-mono"
+              />
+              <p className={baseUrlError ? "text-xs text-destructive" : help}>
+                {baseUrlError ??
+                  "Optional. Leave empty for OpenRouter. Any https OpenAI-compatible endpoint works; your history and pages are sent only there."}
+              </p>
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="api-key-replace">API key</Label>
+              <div className="flex gap-2">
+                <Input
+                  id="api-key-replace"
+                  type="password"
+                  value={keyDraft}
+                  onChange={(e) => setKeyDraft(e.target.value)}
+                  placeholder="Paste a new key to replace the saved one"
+                  autoComplete="off"
+                  className="font-mono"
+                />
+                <Button
+                  variant="secondary"
+                  disabled={!keyValid}
+                  onClick={async () => {
+                    await onChangeApiKey(keyDraft.trim());
+                    setKeyDraft("");
+                    toast.success("API key replaced");
+                  }}
+                >
+                  Replace
+                </Button>
+              </div>
+            </div>
+          </TabsContent>
+
+          <TabsContent value="schedule" forceMount className="data-[state=inactive]:hidden grid gap-2 pt-2">
+            <div className="flex items-center justify-between gap-4 rounded-lg border p-4">
+              <div className="grid gap-1">
+                <Label htmlFor="auto-rebuild">Rebuild automatically each morning</Label>
+                <p className={help}>
+                  When on, the extension builds one morning edition a day in the background (first time Chrome is open
+                  between 5am and noon), so your next tab shows a fresh one (uses your OpenRouter key; pick a :free model
+                  to keep it at no cost).
+                </p>
+              </div>
+              <Switch id="auto-rebuild" checked={autoRebuild} onCheckedChange={(v) => onToggleAutoRebuild(v)} />
+            </div>
+          </TabsContent>
+        </Tabs>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
             Cancel
-          </button>
-          <button
+          </Button>
+          <Button
             onClick={async () => {
               // Persist model and endpoint before the rebuild reads settings.
-              if (!(await commitBaseUrl())) return;
+              if (!(await commitBaseUrl())) {
+                setTab("model");
+                return;
+              }
               await commitModel();
               onSave(draft, normalizeBlockList(blockedDraft.split("\n")));
             }}
-            style={btn}
           >
             Save &amp; rebuild
-          </button>
-        </div>
-      </div>
-    </div>
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
