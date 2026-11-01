@@ -181,7 +181,7 @@ export class Workspace {
   write(input: { path: string; content: string; append?: boolean }): string {
     const path = normalizePath(input.path);
     if (!path.startsWith(`${OUTPUTS_DIR}/`)) throw new Error(`write is only allowed under ${OUTPUTS_DIR}/ (use ${OUTPUTS_DIR}/homepage.tsx)`);
-    if (!/\.(tsx|jsx|ts|js)$/.test(path)) throw new Error("write only accepts .tsx, .jsx, .ts or .js files");
+    if (!/\.(tsx|jsx|ts|js|json)$/.test(path)) throw new Error("write only accepts .json, .tsx, .jsx, .ts or .js files");
     if (typeof input.content !== "string") throw new Error("write needs a string `content`");
     const next = (input.append ? this.files.get(path) ?? "" : "") + input.content;
     if (next.length > MAX_OUTPUT_CHARS) throw new Error(`File would exceed ${MAX_OUTPUT_CHARS} chars; write a smaller component`);

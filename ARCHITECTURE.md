@@ -43,14 +43,28 @@ service worker                                   OpenRouter
   credentials.
 - `workspace.ts`: the in-memory file system. Scraped pages go to `/pages/<slug>_<n>.html`
   (a line break before each block-level tag, so `grep`/`read` return a headline with its link, capped at 400k chars each). `write` is
-  only allowed under `/outputs/` with a `.tsx/.jsx/.ts/.js` extension, and supports
+  only allowed under `/outputs/` with a `.tsx/.jsx/.ts/.js/.json` extension, and supports
   `append` so small-output models can write the component in chunks.
 - `orchestrator.ts`: `runHomepageBuild`. Up to 40 model steps. Tool results are truncated
   to 12k chars; once the conversation passes ~120k chars the oldest tool results (and old
   `write` arguments) are replaced with a short placeholder, so small-context models keep
   working. If the model stops without writing the deliverable it is nudged (twice at most);
   as a last resort a ```tsx fence containing `PersonalizedHomepage` in the final message
-  is accepted.
+  is accepted. The deliverable is `/outputs/homepage.tsx` (a custom look) or
+  `/outputs/edition.json` (the default look, rendered by `morning-tab.ts`).
+- `check-component.ts`: the deliverable must compile (sucrase), `export default`, and
+  import only `react`. If it fails (or the edition JSON doesn't parse), the error goes
+  back to the model **once** (`repaired` in the checkpoint, plus 6 extra steps); still
+  failing, the build throws and the old homepage stays.
+- `links.ts`: every URL the build saw (`SeenUrls`, checkpointed): history domains'
+  front pages, pages opened by `getPageHtml` (requested and final URL) and their
+  `<a href>`s, resolved. `validateHomepageLinks` then removes JSX `href="…"` literals
+  and nulls link-ish data fields (`url`, `href`, `link`, `*Url` …, not images) whose
+  value isn't an absolute `http(s)` URL in that set. The kept links are saved with the
+  homepage as its click allowlist.
+- `runHomepageRepair`: the one repair for a homepage that compiled but failed to
+  render in a tab. Only the component and the error are sent; only `write` is offered;
+  the result is checked the same way, and may not add links outside the old allowlist.
 
 ### Keeping the worker alive
 
@@ -79,6 +93,26 @@ The finished component renders inside a Sandpack iframe
 (`entrypoints/newtab/components/HomepagePreview.tsx`): it is model-written code, so
 it runs sandboxed, not in the extension's own page.
 
+**Links and render status** (`lib/link-bridge.ts`). A link in that iframe would
+navigate the cross-origin, sandboxed frame itself (most sites refuse to be framed),
+so the Sandpack entry imports `/bridge.js` before the component. It cancels every
+link click in the capture phase and replaces `window.open`, posting
+`{type: "ai-homepage:open-link", url, disposition}` to the parent; it also unlinks
+any `<a href>` outside the homepage's allowlist (MutationObserver, so links built at
+runtime too). The new tab only accepts messages whose `source` is the preview
+iframe, re-checks the URL (absolute `http(s)`, on the allowlist) and that the page
+has user activation, then calls `tabs.update` (click) or `tabs.create` (Ctrl/⌘/
+middle click, `window.open`). Homepages saved before the allowlist existed accept any
+absolute `http(s)` URL.
+
+The entry also wraps the component in an error boundary and reports
+`ai-homepage:rendered` (non-empty `#root` after mount) or `ai-homepage:render-error`;
+Sandpack's own `show-error` covers compile errors. On success the tab stores the
+version as `lastGoodHomepage`. On failure (`lib/render-fallback.ts`) it shows that
+last working version with a notice, or an error card if there is none, and sends
+`{kind: "repair"}` once; the worker marks the homepage `repairAttempted` before
+calling the model, so a homepage is never repaired twice.
+
 The extension's own UI (key screen, Settings, toolbar, build progress) uses Tailwind
 v4 and shadcn/ui components on Radix primitives (`components/ui/`). Those styles
 apply only to the new-tab document; the homepage renders in Sandpack's cross-origin
@@ -92,7 +126,10 @@ packages/agent-core/      host-agnostic agent loop — imports no chrome.*, brow
   llm.ts                  OpenAI-compatible chat client (OpenRouter by default)
   workspace.ts            in-memory /pages and /outputs with read / grep / glob / write
   setup.ts                default model, model suggestions, storage keys
-  prompt.ts               system prompt + per-build kickoff message
+  prompt.ts               system prompt (Morning Tab default, links rules), kickoff and repair messages
+  morning-tab.ts          The Morning Tab: edition.json schema, sanitizer, fixed template
+  links.ts                linkKey, SeenUrls, validateHomepageLinks
+  check-component.ts      compile / export / imports check for a deliverable
   schemas.ts              tool input schemas and defaults
   history-digest.ts       narrows raw history to fit a tool result
   types.ts                BrowserBridge, KVStore, RunPhase, …
@@ -112,6 +149,8 @@ apps/extension/           MV3 extension (WXT + React)
     auto-rebuild.ts       when to rebuild on a schedule
     storage.ts            every chrome.storage key, settings, saved homepage
     transpile.ts          TSX → JS for the preview
+    link-bridge.ts        iframe bridge script + parent-side message handler (links, render status)
+    render-fallback.ts    what to show when a homepage fails to render, and when to repair
     model-catalog.ts      model picker: presets + OpenRouter's public tool-calling list
     utils.ts              cn() class-name helper for the UI components
 
@@ -123,10 +162,10 @@ harness/                  Bun scripts: mock-fetch tests of the loop, a real-API 
 
 | Command | Proves |
 |---|---|
-| `pnpm test` | History digest; blocked-site / private-IP filtering through the real loop; the agent loop against a mock `fetch` (request shape, tools, append, nudges, fence fallback, truncation, compaction, retries, 401, abort, checkpoint → resume) |
+| `pnpm test` | History digest; blocked-site / private-IP filtering through the real loop; the agent loop against a mock `fetch` (request shape, tools, append, nudges, fence fallback, truncation, compaction, retries, 401, abort, checkpoint → resume); link validation; the Morning Tab template; the in-build and runtime repair; the link bridge (script and parent handler); the render fallback decision |
 | `pnpm agent:run` | Full build against the real API with fixture history (needs `OPENROUTER_API_KEY`, spends credits) |
 | `pnpm agent:verify` | The deliverable transforms, evaluates and server-renders |
-| `pnpm extension:test` | In headless Chrome: worker registers, new tab renders, port protocol answers, `chrome.history` reads |
+| `pnpm extension:test` | In headless Chrome: worker registers, new tab renders, port protocol answers, `chrome.history` reads; a fixture homepage reports its render, an allowlisted link opens via `chrome.tabs` (⌘-click: new tab, click: this tab) and an unlisted one doesn't; a throwing homepage falls back, or shows an error card (needs network for Sandpack and example.com) |
 
 The harness's bridge uses fixture history and a plain `fetch`, so it can't see
 logged-in pages — that's the whole reason `getPageHtml` runs in your browser.

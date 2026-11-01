@@ -85,8 +85,11 @@ export const GLOB_SCHEMA: ToolInputSchema = {
 export const WRITE_SCHEMA: ToolInputSchema = {
   type: "object",
   properties: {
-    path: { type: "string", description: "Where to write. Must be /outputs/homepage.tsx for the deliverable." },
-    content: { type: "string", description: "The file contents (raw TSX, no markdown fence)." },
+    path: {
+      type: "string",
+      description: "/outputs/edition.json for the default Morning Tab look, or /outputs/homepage.tsx for a custom component.",
+    },
+    content: { type: "string", description: "The file contents: raw JSON or raw TSX, no markdown fence." },
     append: {
       type: "boolean",
       description: "Append to the file instead of replacing it. Lets you write a long component in several calls.",

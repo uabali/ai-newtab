@@ -27,13 +27,21 @@ export const KEYS = {
   lastAutoBuildAttempt: "lastAutoBuildAttempt",
   /** Throttled mirror of the live build state, for tabs that open while the worker sleeps. */
   buildSnapshot: "buildSnapshot",
+  /** The newest homepage a tab rendered successfully: shown when a newer one fails to render. */
+  lastGoodHomepage: "lastGoodHomepage",
 } as const;
 
 export interface Homepage {
   /** The agent's raw TSX source. */
   code: string;
-  /** ISO timestamp of when it was built. */
+  /** ISO timestamp of when it was built. Also identifies the version. */
   timestamp: string;
+  /** Link keys the component may open (the build's link check). Absent on homepages saved before it. */
+  links?: string[];
+  /** Whether this homepage has used its one repair attempt (in the build, or after a failed render). */
+  repairAttempted?: boolean;
+  /** "edition" (The Morning Tab template), "session-output", "message-fence" or "repair". */
+  source?: string;
 }
 
 export interface Settings {
@@ -96,7 +104,30 @@ export async function loadHomepage(): Promise<Homepage | undefined> {
   return extensionStore.get<Homepage>(KEYS.homepage);
 }
 
-export async function saveHomepage(code: string): Promise<void> {
-  const homepage: Homepage = { code, timestamp: new Date().toISOString() };
+/** A build or repair result as a saved homepage. */
+export function homepageFromResult(
+  result: { code: string; links: string[]; repaired: boolean; source: string },
+  now = new Date(),
+): Homepage {
+  return {
+    code: result.code,
+    timestamp: now.toISOString(),
+    links: result.links,
+    repairAttempted: result.repaired,
+    source: result.source,
+  };
+}
+
+export async function saveHomepage(homepage: Homepage): Promise<void> {
   await extensionStore.set(KEYS.homepage, homepage);
+}
+
+export async function loadLastGoodHomepage(): Promise<Homepage | undefined> {
+  return extensionStore.get<Homepage>(KEYS.lastGoodHomepage);
+}
+
+/** Remember a homepage that rendered, as the fallback for a newer one that doesn't. */
+export async function markHomepageRendered(homepage: Homepage): Promise<void> {
+  const last = await loadLastGoodHomepage();
+  if (last?.timestamp !== homepage.timestamp) await extensionStore.set(KEYS.lastGoodHomepage, homepage);
 }

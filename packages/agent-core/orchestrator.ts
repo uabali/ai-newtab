@@ -12,7 +12,16 @@
  */
 import { buildHistoryDigest, slugifyUrl } from "./history-digest";
 import type { ChatClient, ChatMessage, ChatTool, ChatToolCall } from "./llm";
-import { HOMEPAGE_SYSTEM_PROMPT, OUTPUT_PATH, buildKickoffMessage } from "./prompt";
+import { checkComponent } from "./check-component";
+import { SeenUrls, linkKey, literalLinks, validateHomepageLinks, type RemovedLink } from "./links";
+import { EDITION_PATH, parseEdition, renderMorningTab } from "./morning-tab";
+import {
+  HOMEPAGE_SYSTEM_PROMPT,
+  OUTPUT_PATH,
+  REPAIR_SYSTEM_PROMPT,
+  buildKickoffMessage,
+  buildRepairMessage,
+} from "./prompt";
 import { DEFAULT_BLOCKED_SITES, isAllowedUrl, isBlocked, isPrivateAddress, normalizeBlockList } from "./site-filter";
 import {
   DEFAULTS,
@@ -53,6 +62,8 @@ export const LOOP_DEFAULTS = {
   contextBudgetChars: 120_000,
   /** Times the model is reminded to call write when it stops without a deliverable. */
   maxNudges: 2,
+  /** Extra model turns for the one repair attempt after a deliverable fails its check. */
+  repairSteps: 6,
 } as const;
 
 export interface RunOptions {
@@ -89,6 +100,10 @@ export interface RunCheckpoint {
   steps: number;
   nudges: number;
   finalMessage: string;
+  /** Link keys the build has seen (scraped pages, their hrefs, history domains). Absent in older checkpoints. */
+  seenUrls?: string[];
+  /** Whether the one repair attempt has been used. */
+  repaired?: boolean;
 }
 
 function tool(name: string, description: string, parameters: ChatTool["function"]["parameters"]): ChatTool {
@@ -113,7 +128,12 @@ export const HOMEPAGE_TOOLS: ChatTool[] = [
   tool("read", "Read a line range of a workspace file. Output is numbered and truncated.", READ_SCHEMA),
   tool("grep", "Search workspace files line by line with a regular expression. Returns path:line: text.", GREP_SCHEMA),
   tool("glob", "List workspace files matching a glob, with their sizes.", GLOB_SCHEMA),
-  tool("write", `Write the finished component to ${OUTPUT_PATH}. Supports append for long files.`, WRITE_SCHEMA),
+  tool(
+    "write",
+    `Write the deliverable: ${EDITION_PATH} (JSON for the default Morning Tab look) or ${OUTPUT_PATH} ` +
+      "(a React component, only when the user asked for a different look). Supports append for long files.",
+    WRITE_SCHEMA,
+  ),
 ];
 
 export function truncate(text: string, max: number): string {
@@ -207,10 +227,12 @@ export async function runHomepageBuild(opts: RunOptions): Promise<HomepageBuildR
   }
   const state = run;
   const workspace = new Workspace(state.files);
+  const seen = new SeenUrls(state.seenUrls ?? []);
   emit.log(`run=${state.id} model=${state.model}`);
 
   const checkpoint = async () => {
     state.files = workspace.snapshot();
+    state.seenUrls = seen.toJSON();
     try {
       await store.set(STORAGE_KEYS.runCheckpoint, state);
     } catch (err) {
@@ -237,9 +259,9 @@ export async function runHomepageBuild(opts: RunOptions): Promise<HomepageBuildR
       );
       switch (call.function.name) {
         case "getHistory":
-          return fitJson(await runGetHistory(input, bridge, emit, blockedSites), maxToolResultChars);
+          return fitJson(await runGetHistory(input, bridge, emit, blockedSites, seen), maxToolResultChars);
         case "getPageHtml":
-          return truncate(JSON.stringify(await runGetPageHtml(input, { bridge, workspace, emit, blockedSites })), maxToolResultChars);
+          return truncate(JSON.stringify(await runGetPageHtml(input, { bridge, workspace, emit, blockedSites, seen })), maxToolResultChars);
         case "read":
           emit.phase("analyzing", "read");
           return workspace.read(input as { path: string }, maxToolResultChars);
@@ -263,10 +285,32 @@ export async function runHomepageBuild(opts: RunOptions): Promise<HomepageBuildR
   };
 
   try {
+    let stepLimit = state.repaired ? Math.max(maxSteps, state.steps + LOOP_DEFAULTS.repairSteps) : maxSteps;
+    /**
+     * The one repair attempt: a deliverable that doesn't compile (or an edition that
+     * doesn't parse) goes back to the model once, with the error.
+     */
+    const askRepair = async (): Promise<boolean> => {
+      if (state.repaired || !findDeliverable(workspace)) return false;
+      const problem = deliverableProblem(workspace, state.finalMessage, now);
+      if (!problem) return false;
+      state.repaired = true;
+      stepLimit = state.steps + LOOP_DEFAULTS.repairSteps;
+      emit.log(`deliverable failed its check, asking for one repair: ${problem}`);
+      state.messages.push({
+        role: "user",
+        content:
+          `Your homepage failed to build: ${problem}\n` +
+          `Fix it and write the complete file again with the write tool (same path). This is the only retry.`,
+      });
+      await checkpoint();
+      return true;
+    };
     while (true) {
       if (signal?.aborted) throw new Error("aborted");
-      if (state.steps >= maxSteps) {
-        emit.log(`stopped after ${maxSteps} model turns`);
+      if (state.steps >= stepLimit) {
+        if (await askRepair()) continue;
+        emit.log(`stopped after ${state.steps} model turns`);
         break;
       }
 
@@ -300,23 +344,37 @@ export async function runHomepageBuild(opts: RunOptions): Promise<HomepageBuildR
         continue;
       }
 
-      if (findDeliverable(workspace)) break;
+      if (findDeliverable(workspace)) {
+        if (await askRepair()) continue;
+        break;
+      }
       if (state.nudges >= LOOP_DEFAULTS.maxNudges) break;
       state.nudges++;
       emit.log(`no ${OUTPUT_PATH} yet (finish_reason=${response.finishReason ?? "?"}); reminding the model`);
       state.messages.push({
         role: "user",
         content:
-          `You have not written ${OUTPUT_PATH} yet. Call the write tool now with the complete ` +
-          `PersonalizedHomepage component (use append: true to send it in parts if it is long).`,
+          `You have not written the homepage yet. Call the write tool now: the edition JSON to ${EDITION_PATH} ` +
+          `(default look) or the complete component to ${OUTPUT_PATH} (use append: true to send it in parts if it is long).`,
       });
       await checkpoint();
     }
 
     emit.phase("writing");
-    const code = collectDeliverable(workspace, state.finalMessage, emit);
+    const built = collectDeliverable(workspace, state.finalMessage, emit, now);
+    const problem = checkComponent(built.code);
+    if (problem) throw new Error(`The homepage failed to build${state.repaired ? " after one repair attempt" : ""}: ${problem}`);
+    const checked = validateHomepageLinks(built.code, seen);
+    emit.log(`links: kept ${checked.links.length}, removed ${checked.removed.length} (not seen or not http(s))`);
     emit.phase("done");
-    return { code: code.code, sessionId: state.id, source: code.source };
+    return {
+      code: checked.code,
+      sessionId: state.id,
+      source: built.source,
+      links: checked.links,
+      removedLinks: checked.removed,
+      repaired: Boolean(state.repaired),
+    };
   } finally {
     // Privacy: the checkpoint holds every domain, title and page body this
     // build read. It exists only so a killed worker can resume; drop it now.
@@ -346,6 +404,7 @@ async function runGetHistory(
   bridge: BrowserBridge,
   emit: Emit,
   blockedSites: string[],
+  seen: SeenUrls,
 ): Promise<GetHistoryResult> {
   const daysToAnalyze = clamp(input.daysToAnalyze, DEFAULTS.daysToAnalyze, 1, 90);
   const maxResults = clamp(input.maxResults, DEFAULTS.maxResults, 1, 50);
@@ -359,6 +418,7 @@ async function runGetHistory(
     maxResults,
     totalSitesSeen: totalSitesSeen - (sites.length - allowed.length),
   });
+  for (const site of digest.sites) seen.addDomain(site.domain);
   emit.log(`history: ${digest.sites.length} of ${digest.totalSitesSeen} domains`);
   return digest;
 }
@@ -370,7 +430,7 @@ function clamp(value: unknown, fallback: number, min: number, max: number): numb
 
 async function runGetPageHtml(
   input: Record<string, unknown>,
-  ctx: { bridge: BrowserBridge; workspace: Workspace; emit: Emit; blockedSites: string[] },
+  ctx: { bridge: BrowserBridge; workspace: Workspace; emit: Emit; blockedSites: string[]; seen: SeenUrls },
 ): Promise<GetPageHtmlResult> {
   const requested = Array.isArray(input.urls) ? input.urls.map(String) : [];
   if (!requested.length) throw new Error("getPageHtml needs a non-empty `urls` array");
@@ -411,6 +471,10 @@ async function runGetPageHtml(
     try {
       const filename = `${slugifyUrl(page.url)}_${existing + refs.length}.html`;
       const saved = ctx.workspace.addPage(filename, page.html);
+      // Links the model may use: the page itself and every href on it.
+      ctx.seen.add(page.url);
+      ctx.seen.addPage(page.html, page.finalUrl || page.url);
+      if (page.finalUrl && page.finalUrl !== page.url) ctx.seen.add(page.url);
       refs.push({ url: page.url, title: page.title, mountPath: saved.path, bytes: saved.bytes });
       ctx.emit.log(`saved ${page.url} -> ${saved.path} (${saved.bytes} chars)`);
     } catch (err) {
@@ -433,6 +497,15 @@ async function runGetPageHtml(
 
 const CODE_FENCE = /```(?:tsx|jsx|ts|js|typescript|javascript)?\s*\n([\s\S]*?)```/;
 
+/** What is wrong with the current deliverable, or null when it builds. */
+function deliverableProblem(workspace: Workspace, finalMessage: string, now: Date): string | null {
+  try {
+    return checkComponent(collectDeliverable(workspace, finalMessage, { phase() {}, text() {}, log() {} }, now).code);
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+}
+
 /** Strip a ```tsx fence, if the model wrapped the file contents in one. */
 function stripFence(text: string): string {
   const fenced = text.match(CODE_FENCE);
@@ -442,6 +515,8 @@ function stripFence(text: string): string {
 function findDeliverable(workspace: Workspace): { path: string; text: string } | undefined {
   const primary = workspace.get(OUTPUT_PATH);
   if (primary?.trim()) return { path: OUTPUT_PATH, text: primary };
+  const edition = workspace.get(EDITION_PATH);
+  if (edition?.trim()) return { path: EDITION_PATH, text: edition };
   for (const file of workspace.list()) {
     if (!file.path.startsWith(`${OUTPUTS_DIR}/`) || !/\.(tsx|jsx|ts|js)$/.test(file.path)) continue;
     const text = workspace.get(file.path);
@@ -454,8 +529,14 @@ function collectDeliverable(
   workspace: Workspace,
   finalMessage: string,
   emit: Emit,
+  now: Date,
 ): { code: string; source: HomepageBuildResult["source"] } {
   const file = findDeliverable(workspace);
+  if (file?.path === EDITION_PATH) {
+    const edition = parseEdition(file.text);
+    emit.log(`deliverable: The Morning Tab from ${EDITION_PATH} (${1 + edition.stories.length + edition.briefs.length} items)`);
+    return { code: renderMorningTab(edition, now), source: "edition" };
+  }
   if (file) {
     emit.log(`deliverable from workspace output: ${file.path} (${file.text.length} chars)`);
     return { code: stripFence(file.text), source: "session-output" };
@@ -473,4 +554,97 @@ function collectDeliverable(
     `Agent produced no homepage. Expected a file at ${OUTPUT_PATH}. ` +
       `Final message: ${finalMessage.slice(0, 400)}`,
   );
+}
+
+// ---------------------------------------------------------------------------
+// repair after a failed render
+// ---------------------------------------------------------------------------
+
+export interface RepairOptions {
+  llm: ChatClient;
+  model?: HomepageModel;
+  /** The component that failed. */
+  code: string;
+  /** What the page reported (an exception message, "rendered an empty page", …). */
+  error: string;
+  /** Links the failed homepage was allowed to use; the repair may not add others. Defaults to its literal links. */
+  allowedLinks?: string[];
+  callbacks?: RunCallbacks;
+  signal?: AbortSignal;
+  maxSteps?: number;
+  maxTokens?: number;
+}
+
+/**
+ * The one repair attempt for a homepage that failed to render in a tab. The model
+ * gets only the component and the error (no history, no pages) and may only call
+ * write. The result is checked like a fresh build; if it still fails, this throws
+ * and the caller keeps showing the last working homepage.
+ */
+export async function runHomepageRepair(opts: RepairOptions): Promise<HomepageBuildResult> {
+  const { llm, callbacks, signal } = opts;
+  const emit: Emit = {
+    phase: (p, d) => callbacks?.onPhase?.(p, d),
+    text: (t) => callbacks?.onText?.(t),
+    log: (l) => callbacks?.onLog?.(l),
+  };
+  const model = normalizeModelId(opts.model ?? DEFAULT_MODEL);
+  const maxSteps = opts.maxSteps ?? 4;
+  const allowed = new Set((opts.allowedLinks ?? literalLinks(opts.code)).map((u) => linkKey(u)).filter(Boolean) as string[]);
+  const workspace = new Workspace();
+  const messages: ChatMessage[] = [
+    { role: "system", content: REPAIR_SYSTEM_PROMPT },
+    { role: "user", content: buildRepairMessage(opts.code, opts.error) },
+  ];
+  const writeTool = HOMEPAGE_TOOLS.filter((t) => t.function.name === "write");
+  let finalMessage = "";
+  emit.phase("setup");
+  emit.log(`repair: model=${model}, error=${opts.error.slice(0, 200)}`);
+
+  for (let step = 0; step < maxSteps; step++) {
+    if (signal?.aborted) throw new Error("aborted");
+    emit.phase("thinking");
+    const response = await llm.complete({ model, messages, tools: writeTool, maxTokens: opts.maxTokens }, signal);
+    if (response.content) {
+      finalMessage += (finalMessage ? "\n" : "") + response.content;
+      emit.text(response.content);
+    }
+    messages.push({
+      role: "assistant",
+      content: response.content ?? null,
+      ...(response.toolCalls.length ? { tool_calls: response.toolCalls } : {}),
+    });
+    if (!response.toolCalls.length) break;
+    for (const call of response.toolCalls) {
+      let result: string;
+      try {
+        if (call.function.name !== "write") throw new Error(`Only the write tool is available.`);
+        const input = JSON.parse(call.function.arguments || "{}");
+        emit.phase("writing");
+        result = workspace.write({ ...input, path: OUTPUT_PATH });
+      } catch (err) {
+        result = `Error: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      messages.push({ role: "tool", tool_call_id: call.id, content: result });
+    }
+  }
+
+  emit.phase("writing");
+  const written = workspace.get(OUTPUT_PATH);
+  const fenced = finalMessage.match(CODE_FENCE);
+  const code = written?.trim() ? stripFence(written) : fenced?.[1]?.includes("PersonalizedHomepage") ? fenced[1].trim() : "";
+  if (!code) throw new Error("The repair attempt produced no component.");
+  const problem = checkComponent(code);
+  if (problem) throw new Error(`The repaired homepage still fails: ${problem}`);
+  const checked = validateHomepageLinks(code, { has: (u) => allowed.has(linkKey(u) ?? "") });
+  emit.log(`repair: links kept ${checked.links.length}, removed ${checked.removed.length}`);
+  emit.phase("done");
+  return {
+    code: checked.code,
+    sessionId: `repair-${Date.now().toString(36)}`,
+    source: "repair",
+    links: checked.links,
+    removedLinks: checked.removed,
+    repaired: true,
+  };
 }

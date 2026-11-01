@@ -88,6 +88,9 @@ export default function PersonalizedHomepage() {
   return <a href="https://news.ycombinator.com/item?id=1">Story</a>;
 }`;
 
+/** COMPONENT after the link check, when the model never saw its link (no page was scraped). */
+export const COMPONENT_UNLINKED = COMPONENT.replace(' href="https://news.ycombinator.com/item?id=1"', "");
+
 /** Every tool message the model was sent, by tool_call_id, from the last request. */
 export function toolResults(req: RecordedRequest): Record<string, string> {
   return Object.fromEntries(

@@ -6,9 +6,16 @@
  *   2. the new-tab override renders (the API-key screen on a fresh profile),
  *   3. the worker answers `subscribe` on the build port with a snapshot,
  *   4. `startBuild` with no API key fails cleanly with an error message,
- *   5. `chrome.history` is readable, so the `history` permission is real.
+ *   5. `chrome.history` is readable, so the `history` permission is real,
+ *   6. a generated homepage reports that it rendered, and its links open through
+ *      the bridge: an allowlisted link opens with chrome.tabs (⌘-click: new tab;
+ *      click: this tab), a link outside the allowlist does nothing,
+ *   7. a homepage that throws falls back to the last working one, and with none
+ *      shows an error card instead of a blank page.
  *
- * No API calls are made. Chrome 136+ ignores `--load-extension`, so the
+ * No model calls are made (a DUMMY key is stored only so the homepage view shows;
+ * the fixtures are marked as already repaired, so no repair is requested). Steps
+ * 6–7 need the network: Sandpack's hosted bundler, and example.com as the link. Chrome 136+ ignores `--load-extension`, so the
  * extension is loaded over CDP's Extensions domain instead.
  *
  * Run: pnpm build && pnpm extension:test
@@ -202,6 +209,97 @@ try {
     domains.includes("news.ycombinator.com"),
     domains.join(", "),
   );
+
+  // ---- 6. generated homepage: render report and links ------------------------
+  const DUMMY_KEY = "sk-or-v1-dummy-test-key-not-real-0000";
+  const LINKS_HOMEPAGE = `import React from 'react';
+export default function PersonalizedHomepage() {
+  const s = { position: 'fixed', left: 40, width: 640, height: 90, display: 'block', fontSize: 40, background: '#eee' };
+  return (
+    <div>
+      <a href="https://example.com/" style={{ ...s, top: 140 }}>Allowed link</a>
+      <a href="https://made.up.invalid/" style={{ ...s, top: 300 }}>Not on the allowlist</a>
+    </div>
+  );
+}`;
+  const t1 = new Date(Date.now() - 60_000).toISOString();
+  const setStore = (items: Record<string, unknown>) => page.evaluate(`chrome.storage.local.set(${JSON.stringify(items)})`);
+  const getStore = <T>(key: string) => page.evaluate<T>(`chrome.storage.local.get(${JSON.stringify(key)}).then((r) => r[${JSON.stringify(key)}] ?? null)`);
+  const waitFor = async (what: () => Promise<boolean>, ms: number) => {
+    for (let t = 0; t < ms; t += 500) {
+      try {
+        if (await what()) return true;
+      } catch {
+        /* page navigating */
+      }
+      await sleep(500);
+    }
+    return false;
+  };
+  const openNewtab = async () => {
+    await page.send("Page.navigate", { url: `chrome-extension://${extId}/newtab.html` });
+    await sleep(1500);
+  };
+  const tabUrl = async () => ((await getJson("/json/list")) as any[]).find((t) => t.id === blank.id)?.url ?? "";
+  const pageTargets = async () => ((await getJson("/json/list")) as any[]).filter((t) => t.type === "page").map((t) => t.url as string);
+  const mouse = async (x: number, y: number, modifiers = 0) => {
+    for (const type of ["mousePressed", "mouseReleased"])
+      await page.send("Input.dispatchMouseEvent", { type, x, y, button: "left", clickCount: 1, modifiers });
+  };
+
+  await setStore({
+    openRouterApiKey: DUMMY_KEY,
+    homepageData: { code: LINKS_HOMEPAGE, timestamp: t1, links: ["https://example.com/"], repairAttempted: true, source: "fixture" },
+  });
+  await openNewtab();
+  const rendered = await waitFor(async () => (await getStore<any>("lastGoodHomepage"))?.timestamp === t1, 45_000);
+  check("generated homepage renders and reports it (saved as last working version)", rendered);
+
+  const frame = await page.evaluate<{ x: number; y: number } | null>(
+    `(() => { const r = document.querySelector("iframe")?.getBoundingClientRect(); return r ? { x: r.x, y: r.y } : null; })()`,
+  );
+  if (!frame) throw new Error("no homepage iframe");
+  await sleep(1000);
+
+  await mouse(frame.x + 300, frame.y + 345);
+  await sleep(1500);
+  const afterBad = await pageTargets();
+  check(
+    "a link outside the allowlist opens nothing",
+    (await tabUrl()).startsWith("chrome-extension://") && !afterBad.some((u) => u.includes("made.up.invalid")),
+  );
+
+  await mouse(frame.x + 300, frame.y + 185, 4 /* Meta */);
+  const opened = await waitFor(async () => (await pageTargets()).some((u) => u.startsWith("https://example.com")), 8000);
+  check("⌘-click on an allowed link opens it in a new tab (chrome.tabs.create)", opened && (await tabUrl()).startsWith("chrome-extension://"));
+
+  await mouse(frame.x + 300, frame.y + 185);
+  const navigated = await waitFor(async () => (await tabUrl()).startsWith("https://example.com"), 8000);
+  check("click on an allowed link opens it in this tab (chrome.tabs.update)", navigated, await tabUrl());
+
+  // ---- 7. render failure: fallback, then error card ---------------------------
+  const BROKEN = `import React from 'react';
+export default function PersonalizedHomepage() {
+  throw new Error("fixture render failure");
+}`;
+  await openNewtab();
+  await setStore({
+    homepageData: { code: BROKEN, timestamp: new Date().toISOString(), links: [], repairAttempted: true, source: "fixture" },
+  });
+  await openNewtab();
+  const fellBack = await waitFor(
+    async () => /Showing your last working homepage/.test(await page.evaluate<string>("document.body.innerText")),
+    45_000,
+  );
+  check("a homepage that throws falls back to the last working one", fellBack);
+
+  await page.evaluate(`chrome.storage.local.remove("lastGoodHomepage")`);
+  await openNewtab();
+  const card = await waitFor(
+    async () => /failed to render/i.test(await page.evaluate<string>("document.body.innerText")),
+    45_000,
+  );
+  check("with no working version it shows an error card, not a blank page", card);
 
   page.close();
   browser.close();
