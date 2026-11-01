@@ -31,9 +31,12 @@ export interface ChatRequest {
   model: string;
   messages: ChatMessage[];
   tools: ChatTool[];
-  /** Omitted unless set: some providers reject a value above the model's own cap. */
+  /** Defaults to DEFAULT_MAX_TOKENS. OpenRouter reserves credit for the full cap, so an unset cap can fail with 402 on small balances. */
   maxTokens?: number;
 }
+
+/** Output cap per request. Small enough for low-credit OpenRouter accounts, large enough for a full homepage write. */
+export const DEFAULT_MAX_TOKENS = 16384;
 
 export interface ChatResponse {
   content: string | null;
@@ -147,7 +150,7 @@ export function createChatClient(opts: ChatClientOptions): ChatClient {
       tools: request.tools,
       tool_choice: "auto",
     };
-    if (request.maxTokens) body.max_tokens = request.maxTokens;
+    body.max_tokens = request.maxTokens ?? DEFAULT_MAX_TOKENS;
 
     let response: Response;
     try {

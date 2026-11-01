@@ -62,7 +62,7 @@ test("runs the whole build over a mock endpoint and returns the written componen
   expect(first.body.model).toBe(DEFAULT_MODEL);
   expect(first.body.tool_choice).toBe("auto");
   expect(first.body.tools.map((t: any) => t.function.name)).toEqual(["getHistory", "getPageHtml", "read", "grep", "glob", "write"]);
-  expect(first.body.max_tokens).toBeUndefined();
+  expect(first.body.max_tokens).toBe(16384);
   expect(first.body.messages[0].role).toBe("system");
 
   // Tool results went back as role:tool messages, matched by id.
