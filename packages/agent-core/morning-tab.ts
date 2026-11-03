@@ -1,12 +1,19 @@
 /**
  * "The Morning Tab": the default look. The model fills in an edition (plain
- * JSON: stories, briefs, "Your day", almanac notes) and this fixed template turns
- * it into the component. A weak model then only has to get content right, and
- * every build looks the same: cream paper, serif type, a big masthead, columns,
- * thin rules. A user who asks for another look gets a hand-written component instead.
+ * JSON: stories, briefs, "Your day", almanac notes, AI-on-X hype) and this fixed
+ * template turns it into the component. A weak model then only has to get content
+ * right, and every build looks the same: cream paper, serif type, a big masthead,
+ * columns, thin rules. A user who asks for another look gets a hand-written
+ * component instead.
  */
 
 export const EDITION_PATH = "/outputs/edition.json";
+
+/** Seed URLs the agent may scrape for AI buzz on X (even if absent from history). */
+export const AI_ON_X_SEED_URLS = [
+  "https://x.com/explore",
+  "https://x.com/search?q=AI%20OR%20LLM&f=live",
+] as const;
 
 export interface EditionStory {
   kicker?: string;
@@ -42,6 +49,8 @@ export interface Edition {
   briefs: EditionBrief[];
   yourDay: EditionDayItem[];
   almanac: EditionNote[];
+  /** Trending AI chatter scraped from X; empty when scrape failed or was blocked. */
+  aiHype: EditionStory[];
 }
 
 /** The shape shown to the model in the system prompt. */
@@ -51,10 +60,11 @@ export const EDITION_EXAMPLE = `{
   "stories": [ { "kicker": "…", "title": "…", "url": "https://…", "summary": "1–3 sentences.", "source": "…", "meta": "…" } ],
   "briefs":  [ { "title": "…", "url": "https://…", "source": "…" } ],
   "yourDay": [ { "when": "Today", "what": "Release candidate due", "url": "https://…" } ],
-  "almanac": [ { "label": "Most-read site", "value": "news.ycombinator.com" } ]
+  "almanac": [ { "label": "Most-read site", "value": "news.ycombinator.com" } ],
+  "aiHype":  [ { "kicker": "@handle", "title": "…", "url": "https://x.com/…", "summary": "1–2 sentences.", "source": "X", "meta": "12k likes" } ]
 }`;
 
-const LIMITS = { stories: 9, briefs: 12, yourDay: 6, almanac: 5 } as const;
+const LIMITS = { stories: 9, briefs: 12, yourDay: 6, almanac: 5, aiHype: 6 } as const;
 
 function text(v: unknown, max: number): string {
   if (typeof v === "number") return String(v);
@@ -129,6 +139,7 @@ export function sanitizeEdition(raw: unknown): Edition {
       },
       LIMITS.almanac,
     ),
+    aiHype: list(o.aiHype ?? o.ai_hype ?? o.xHype, story, LIMITS.aiHype),
   };
 }
 
@@ -160,9 +171,11 @@ function editionName(d: Date): string {
 /** Fixed facts the template prints, computed here so the model can't get them wrong. */
 export function editionFacts(edition: Edition, now: Date) {
   const sources = new Set(
-    [edition.lead, ...edition.stories, ...edition.briefs].map((s) => s.source?.toLowerCase()).filter(Boolean),
+    [edition.lead, ...edition.stories, ...edition.briefs, ...edition.aiHype]
+      .map((s) => s.source?.toLowerCase())
+      .filter(Boolean),
   );
-  const count = 1 + edition.stories.length + edition.briefs.length;
+  const count = 1 + edition.stories.length + edition.briefs.length + edition.aiHype.length;
   const year = now.getFullYear();
   const daysInYear = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0 ? 366 : 365;
   const doy = dayOfYear(now);
@@ -221,6 +234,8 @@ const CSS = \`
 .mt-more { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 0 32px; margin-top: 14px; }
 .mt-briefs { columns: 3 260px; column-gap: 32px; column-rule: 1px solid #cfc7b5; margin-top: 14px; }
 .mt-brief { break-inside: avoid; padding: 8px 0; border-bottom: 1px solid #ddd5c3; font-size: 16px; line-height: 1.35; }
+.mt-hype { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 0 32px; margin-top: 14px; }
+.mt-hype .mt-story h2 { font-size: 20px; }
 .mt-foot { margin-top: 36px; padding-top: 10px; border-top: 1px solid #cfc7b5; text-align: center; }
 @media (max-width: 980px) { .mt-grid { grid-template-columns: 1fr 1fr; } .mt-side { grid-column: 1 / -1; border-left: 0 !important; padding-left: 0 !important; display: grid; grid-template-columns: 1fr 1fr; gap: 0 24px; } }
 @media (max-width: 640px) { .mt-grid, .mt-side { grid-template-columns: 1fr; } .mt-col + .mt-col { border-left: 0; padding-left: 0; } .mt-top, .mt-date { flex-direction: column; align-items: center; gap: 4px; } }
@@ -312,6 +327,13 @@ export default function PersonalizedHomepage() {
           <section className="mt-section">
             <div className="mt-small">More from your feeds</div>
             <div className="mt-more">{more.map((item, i) => <Story key={i} item={item} />)}</div>
+          </section>
+        ) : null}
+
+        {e.aiHype && e.aiHype.length ? (
+          <section className="mt-section">
+            <div className="mt-small">AI on X</div>
+            <div className="mt-hype">{e.aiHype.map((item, i) => <Story key={i} item={item} />)}</div>
           </section>
         ) : null}
 

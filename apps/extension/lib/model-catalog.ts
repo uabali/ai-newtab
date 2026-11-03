@@ -28,6 +28,7 @@ export const PRESET_OPTIONS: ModelOption[] = MODEL_SUGGESTIONS.map((m) => ({
   label: m.label,
   preset: true,
   free: m.id.endsWith(":free"),
+  contextLength: m.contextLength,
 }));
 
 interface CatalogEntry {
@@ -75,7 +76,11 @@ export function parseCatalog(body: unknown): ModelOption[] {
 export function mergeModelOptions(catalog: ModelOption[]): ModelOption[] {
   const presetIds = new Set(PRESET_OPTIONS.map((p) => p.id));
   const byId = new Map(catalog.map((m) => [m.id, m]));
-  const presets = PRESET_OPTIONS.map((p) => ({ ...p, contextLength: byId.get(p.id)?.contextLength }));
+  const presets = PRESET_OPTIONS.map((p) => ({
+    ...p,
+    // Catalog wins when present; otherwise keep the curated preset length.
+    contextLength: byId.get(p.id)?.contextLength ?? p.contextLength,
+  }));
   return [...presets, ...catalog.filter((m) => !presetIds.has(m.id))];
 }
 

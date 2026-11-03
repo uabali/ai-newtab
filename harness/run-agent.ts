@@ -10,7 +10,13 @@
  * Optional env: OPENROUTER_MODEL, OPENROUTER_BASE_URL, HOMEPAGE_PROMPT.
  * Run: pnpm agent:run
  */
-import { createChatClient, normalizeBaseUrl, normalizeModelId, runHomepageBuild } from "@homepage/agent-core";
+import {
+  contextBudgetCharsForModel,
+  createChatClient,
+  normalizeBaseUrl,
+  normalizeModelId,
+  runHomepageBuild,
+} from "@homepage/agent-core";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { FileKVStore, OUT_DIR, OUT_PATH, STATE_PATH, nodeBridge } from "./node-bridge";
 
@@ -32,6 +38,7 @@ async function main() {
   const result = await runHomepageBuild({
     llm,
     model,
+    contextBudgetChars: contextBudgetCharsForModel(model),
     bridge: nodeBridge,
     store,
     userSystemPrompt: process.env.HOMEPAGE_PROMPT,

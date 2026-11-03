@@ -1,5 +1,12 @@
 import { expect, test } from "bun:test";
-import { DEFAULT_MODEL, MODEL_SUGGESTIONS, normalizeModelId } from "@homepage/agent-core";
+import {
+  DEFAULT_MODEL,
+  MODEL_SUGGESTIONS,
+  contextBudgetCharsFor,
+  contextBudgetCharsForModel,
+  contextLengthForModel,
+  normalizeModelId,
+} from "@homepage/agent-core";
 import {
   MODEL_CATALOG_URL,
   PRESET_OPTIONS,
@@ -10,8 +17,8 @@ import {
 } from "../apps/extension/lib/model-catalog";
 
 const PRESET_IDS = [
-  "nvidia/nemotron-3-ultra-550b-a55b:free",
   "deepseek/deepseek-v4.1-flash",
+  "nvidia/nemotron-3-ultra-550b-a55b:free",
   "anthropic/claude-haiku-5.5",
   "z-ai/glm-5.3-flash",
   "qwen/qwen3.8-flash",
@@ -43,11 +50,13 @@ function recordingFetch(respond: () => Response | Promise<Response>) {
   return { fetch, calls };
 }
 
-test("presets are the curated list, in order, with the free Nemotron model as the default", () => {
+test("presets are the curated list, in order, with DeepSeek Flash as the default", () => {
   expect(MODEL_SUGGESTIONS.map((m): string => m.id)).toEqual(PRESET_IDS);
   expect(PRESET_OPTIONS.map((m) => m.id)).toEqual(PRESET_IDS);
-  expect(DEFAULT_MODEL).toBe("nvidia/nemotron-3-ultra-550b-a55b:free");
-  expect(PRESET_OPTIONS[0]!.free).toBe(true);
+  expect(DEFAULT_MODEL).toBe("deepseek/deepseek-v4.1-flash");
+  expect(PRESET_OPTIONS[0]!.free).toBe(false);
+  expect(PRESET_OPTIONS[0]!.contextLength).toBe(1_000_000);
+  expect(PRESET_OPTIONS[1]!.free).toBe(true);
 });
 
 test("a model the user already saved is kept, even when it is no longer a preset", () => {
@@ -55,6 +64,16 @@ test("a model the user already saved is kept, even when it is no longer a preset
   expect(normalizeModelId("  my/custom-model  ")).toBe("my/custom-model");
   expect(normalizeModelId("")).toBe(DEFAULT_MODEL);
   expect(normalizeModelId(undefined)).toBe(DEFAULT_MODEL);
+});
+
+test("context budget scales with the model window and clamps for safety", () => {
+  expect(contextBudgetCharsFor(undefined)).toBe(120_000);
+  expect(contextBudgetCharsFor(32_000)).toBe(80_000); // 0.5 * 32k * 4 = 64k → min 80k
+  expect(contextBudgetCharsFor(200_000)).toBe(400_000);
+  expect(contextBudgetCharsFor(1_000_000)).toBe(480_000); // capped for MV3 memory
+  expect(contextLengthForModel("deepseek/deepseek-v4.1-flash")).toBe(1_000_000);
+  expect(contextBudgetCharsForModel("deepseek/deepseek-v4.1-flash")).toBe(480_000);
+  expect(contextBudgetCharsForModel("acme/unknown")).toBe(120_000);
 });
 
 test("parseCatalog keeps only well-formed, tool-calling models, without duplicates", () => {
@@ -70,6 +89,8 @@ test("merge puts presets first and doesn't repeat them", () => {
   expect(merged.slice(0, PRESET_IDS.length).map((m) => m.id)).toEqual(PRESET_IDS);
   expect(merged.filter((m) => m.id === "z-ai/glm-5.3-flash")).toHaveLength(1);
   expect(merged.find((m) => m.id === "z-ai/glm-5.3-flash")!.contextLength).toBe(1048576);
+  // Preset contextLength is kept when the catalog has no entry for that id.
+  expect(merged.find((m) => m.id === "deepseek/deepseek-v4.1-flash")!.contextLength).toBe(1_000_000);
   expect(merged.slice(PRESET_IDS.length).map((m) => m.id)).toEqual(["acme/zero-price", "beta/tooly"]);
 });
 

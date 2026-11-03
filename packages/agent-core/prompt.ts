@@ -1,6 +1,8 @@
-import { EDITION_EXAMPLE, EDITION_PATH } from "./morning-tab";
+import { AI_ON_X_SEED_URLS, EDITION_EXAMPLE, EDITION_PATH } from "./morning-tab";
 
 export const OUTPUT_PATH = "/outputs/homepage.tsx";
+
+const AI_ON_X_SEEDS = AI_ON_X_SEED_URLS.map((u) => `      - ${u}`).join("\n");
 
 /**
  * One system prompt for the whole build: choose pages, extract items, deliver
@@ -29,6 +31,12 @@ You have these tools:
    tools, and anything that is obviously a logged-out marketing page. Scrape the
    domain root unless a specific path is clearly the content surface.
 
+   Also reserve 1–2 of those 8 slots for AI buzz on X when x.com is not blocked,
+   even if X is absent from history. Prefer these seed URLs:
+${AI_ON_X_SEEDS}
+   If a seed fails (login wall, blocklist, empty page), leave aiHype as [] — do
+   not invent posts.
+
 3. Call getPageHtml with those URLs. It returns a mountPath (a workspace file
    path) and a size per page. USE THE RETURNED mountPath VERBATIM — do not construct paths yourself,
    do not assume a page lives where you asked for it, and do not re-call
@@ -56,8 +64,8 @@ You have these tools:
 
    A. DEFAULT: "The Morning Tab". Write JSON to ${EDITION_PATH}. The extension
       prints it with a fixed newspaper template: cream paper, serif type, a large
-      masthead, columns separated by thin rules, a "Your day" box and an "Almanac"
-      box. You only supply the content, in exactly this shape:
+      masthead, columns separated by thin rules, a "Your day" box, an "Almanac"
+      box, and an "AI on X" section. You only supply the content, in exactly this shape:
 
 ${EDITION_EXAMPLE
   .split("\n")
@@ -73,6 +81,10 @@ ${EDITION_EXAMPLE
         deadlines, releases, replies waiting). Leave it [] rather than invent.
       - almanac: up to 5 short facts from what you read (e.g. most-read site,
         busiest thread). Dates and counts are added by the template.
+      - aiHype: up to 6 AI-related posts or threads you actually saw on X. Use
+        kicker for the @handle when known, source "X", and meta for likes/reposts
+        if visible. Only real hrefs from the scraped X pages. Use [] when the
+        scrape failed or returned nothing usable — never invent tweets.
       - Plain JSON only: double quotes, no comments, no trailing commas.
 
    B. A DIFFERENT LOOK, only when the user's standing instructions ask for a
@@ -153,6 +165,8 @@ export function buildKickoffMessage({ now, userSystemPrompt }: KickoffInput): st
     custom
       ? `\nThe user's standing instructions (these take priority over your defaults, including the default look):\n${custom}`
       : `\nThe user has no standing instructions: use the default look, The Morning Tab.`,
+    ``,
+    `Reserve 1–2 scrapes for AI buzz on X (seed URLs in the system prompt) when x.com is not blocked; put what you find in aiHype, or [].`,
     ``,
     custom
       ? `Start with getHistory, then scrape, then write ${EDITION_PATH} (default look) or ${OUTPUT_PATH} (if the instructions ask for a different look).`

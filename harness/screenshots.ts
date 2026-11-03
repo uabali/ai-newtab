@@ -81,6 +81,10 @@ const MOCK_EDITION = {
     { label: "Most-read site", value: "news.ycombinator.com" },
     { label: "Sites this week", value: "14" },
   ],
+  aiHype: [
+    { kicker: "@karpathy", title: "A new open model dropped overnight", url: "https://x.com/karpathy/status/1", summary: "The timeline is flooding with evals and screenshots.", source: "X", meta: "12k likes" },
+    { kicker: "@sama", title: "Shipping weekly again", url: "https://x.com/sama/status/2", summary: "A short note on the latest release train.", source: "X", meta: "8k likes" },
+  ],
 };
 
 /** Runs the real build with the MOCK model; the fixture page holds every link the edition uses, except the made-up one. */
@@ -96,6 +100,8 @@ async function buildMockMorningTab() {
     "https://arstechnica.com/science/night-sky",
     "https://github.com/pulls",
     "https://devblogs.microsoft.com/typescript/",
+    "https://x.com/karpathy/status/1",
+    "https://x.com/sama/status/2",
   ]
     .map((u) => `<a href="${u}">${u}</a>`)
     .join("")}</body></html>`;

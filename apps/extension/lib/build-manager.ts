@@ -1,4 +1,5 @@
 import {
+  contextBudgetCharsForModel,
   createChatClient,
   normalizeBaseUrl,
   runHomepageBuild,
@@ -192,6 +193,7 @@ export class BuildManager {
         userSystemPrompt: systemPrompt,
         blockedSites: async () => (await loadSettings()).blockedSites,
         model,
+        contextBudgetChars: contextBudgetCharsForModel(model),
         resumeSessionId,
         signal: this.controller.signal,
         callbacks: {

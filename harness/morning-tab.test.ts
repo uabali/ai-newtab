@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import {
+  AI_ON_X_SEED_URLS,
   EDITION_PATH,
   HOMEPAGE_SYSTEM_PROMPT,
   buildKickoffMessage,
@@ -24,6 +25,10 @@ const RAW = {
   briefs: [{ title: "Brief", url: "https://lobste.rs/", source: "Lobsters" }],
   yourDay: [{ when: "Today", what: "Release due", url: null }],
   almanac: [{ label: "Most-read site", value: 42 }],
+  aiHype: [
+    { kicker: "@karpathy", title: "A new open model dropped", url: "https://x.com/karpathy/status/1", summary: "People are buzzing.", source: "X", meta: "12k likes" },
+    { title: "" },
+  ],
 };
 
 test("sanitizeEdition keeps well-formed items and coerces the rest", () => {
@@ -32,6 +37,8 @@ test("sanitizeEdition keeps well-formed items and coerces the rest", () => {
   expect(e.stories.map((s) => s.title)).toEqual(["A story", "Uses aliases"]);
   expect(e.stories[1]!.url).toBe("https://news.ycombinator.com/item?id=2");
   expect(e.almanac[0]!.value).toBe("42");
+  expect(e.aiHype.map((s) => s.title)).toEqual(["A new open model dropped"]);
+  expect(sanitizeEdition({ stories: [{ title: "Solo" }] }).aiHype).toEqual([]);
   expect(() => sanitizeEdition({ stories: [] })).toThrow();
 });
 
@@ -51,7 +58,7 @@ test("the template prints computed facts the model can't get wrong", () => {
   expect(f.issue).toBe("Vol. I · No. 303");
   expect(f.date).toBe("Friday, October 30, 2026");
   expect(f.edition).toBe("Morning Edition");
-  expect(f.tally).toBe("4 stories from 3 sources");
+  expect(f.tally).toBe("5 stories from 4 sources");
   expect(f.almanac).toEqual([
     { label: "Day of the year", value: "303 of 365" },
     { label: "Days left", value: "62" },
@@ -61,10 +68,14 @@ test("the template prints computed facts the model can't get wrong", () => {
 test("renderMorningTab produces a valid, React-only component with the newspaper layout", () => {
   const code = renderMorningTab(sanitizeEdition(RAW), NOW);
   expect(checkComponent(code)).toBeNull();
-  for (const s of ["The Morning Tab", "#f3efe4", "Your day", "The Almanac", "In brief", "serif", "export default function PersonalizedHomepage"]) {
+  for (const s of ["The Morning Tab", "#f3efe4", "Your day", "The Almanac", "In brief", "AI on X", "serif", "export default function PersonalizedHomepage"]) {
     expect(code).toContain(s);
   }
   expect(code).toContain("MOCK: all the news that fits your history");
+  expect(code).toContain("@karpathy");
+  const emptyHype = renderMorningTab(sanitizeEdition({ ...RAW, aiHype: [] }), NOW);
+  expect(emptyHype).toMatch(/"aiHype": \[\]/);
+  expect(emptyHype).toContain("e.aiHype && e.aiHype.length");
 });
 
 test("checkComponent catches what would break the preview", () => {
@@ -78,8 +89,11 @@ test("checkComponent catches what would break the preview", () => {
 test("the prompt makes The Morning Tab the default, and the user's instructions win", () => {
   expect(HOMEPAGE_SYSTEM_PROMPT).toContain(EDITION_PATH);
   expect(HOMEPAGE_SYSTEM_PROMPT).toContain("The Morning Tab");
+  expect(HOMEPAGE_SYSTEM_PROMPT).toContain("aiHype");
+  expect(HOMEPAGE_SYSTEM_PROMPT).toContain(AI_ON_X_SEED_URLS[0]);
   expect(HOMEPAGE_SYSTEM_PROMPT).toMatch(/only URLs|Only use URLs|only use URLs/i);
   expect(buildKickoffMessage({ now: NOW, userSystemPrompt: "" })).toContain("The Morning Tab");
+  expect(buildKickoffMessage({ now: NOW, userSystemPrompt: "" })).toContain("aiHype");
   const custom = buildKickoffMessage({ now: NOW, userSystemPrompt: "Dark mode, one column." });
   expect(custom).toContain("Dark mode, one column.");
 });

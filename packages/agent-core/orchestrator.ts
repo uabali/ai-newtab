@@ -534,7 +534,9 @@ function collectDeliverable(
   const file = findDeliverable(workspace);
   if (file?.path === EDITION_PATH) {
     const edition = parseEdition(file.text);
-    emit.log(`deliverable: The Morning Tab from ${EDITION_PATH} (${1 + edition.stories.length + edition.briefs.length} items)`);
+    emit.log(
+      `deliverable: The Morning Tab from ${EDITION_PATH} (${1 + edition.stories.length + edition.briefs.length + edition.aiHype.length} items)`,
+    );
     return { code: renderMorningTab(edition, now), source: "edition" };
   }
   if (file) {
